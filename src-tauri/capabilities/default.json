@@ -1,0 +1,20 @@
+{
+  "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-utils/schema.json",
+  "identifier": "default",
+  "description": "Default capabilities for the MITM Proxy app",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-close",
+    "shell:allow-open",
+    "dialog:default",
+    "fs:default",
+    "process:default",
+    "updater:default",
+    {
+      "identifier": "fs:allow-write-text-file",
+      "allow": [{ "path": "$TEMP/*" }, { "path": "$DOWNLOAD/*" }, { "path": "$DOCUMENT/*" }, { "path": "**" }]
+    }
+  ]
+}

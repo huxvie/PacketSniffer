@@ -1,0 +1,269 @@
+@import "tailwindcss";
+@plugin "tailwindcss-animate";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme {
+    /*fonts!*/
+    --font-mono:
+        "Cascadia Code", "Fira Code", "JetBrains Mono", "SF Mono", Consolas,
+        monospace;
+    --font-sans:
+        -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Oxygen",
+        "Ubuntu", "Cantarell", "Fira Sans", "Droid Sans", "Helvetica Neue",
+        sans-serif;
+    --font-chakra: "Chakra Petch", sans-serif;
+}
+
+@theme inline {
+    /*classic shadcn*/
+    --radius-sm: calc(var(--radius) - 4px);
+    --radius-md: calc(var(--radius) - 2px);
+    --radius-lg: var(--radius);
+    --radius-xl: calc(var(--radius) + 4px);
+    --radius-2xl: calc(var(--radius) + 8px);
+    --radius-3xl: calc(var(--radius) + 12px);
+    --radius-4xl: calc(var(--radius) + 16px);
+
+    --color-bg-0: var(--background);
+    --color-bg-1: var(--card);
+    --color-bg-2: var(--muted);
+    --color-bg-3: var(--accent);
+    --color-text-0: var(--foreground);
+    --color-text-1: var(--muted-foreground);
+    --color-text-2: var(--muted-foreground);
+
+    --color-background: var(--background);
+    --color-foreground: var(--foreground);
+    --color-card: var(--card);
+    --color-card-foreground: var(--card-foreground);
+    --color-popover: var(--popover);
+    --color-popover-foreground: var(--popover-foreground);
+    --color-primary: var(--primary);
+    --color-primary-foreground: var(--primary-foreground);
+    --color-secondary: var(--secondary);
+    --color-secondary-foreground: var(--secondary-foreground);
+    --color-muted: var(--muted);
+    --color-muted-foreground: var(--muted-foreground);
+    --color-accent: var(--accent);
+    --color-accent-foreground: var(--accent-foreground);
+    --color-destructive: var(--destructive);
+    --color-border: var(--border);
+    --color-input: var(--input);
+    --color-ring: var(--ring);
+
+    --color-sidebar: var(--sidebar);
+    --color-sidebar-foreground: var(--sidebar-foreground);
+    --color-sidebar-border: var(--sidebar-border);
+    --color-panel-header: var(--panel-header);
+
+    --color-method-get: var(--method-get);
+    --color-method-post: var(--method-post);
+    --color-method-put: var(--method-put);
+    --color-method-delete: var(--method-delete);
+    --color-method-patch: var(--method-patch);
+    --color-method-options: var(--method-options);
+
+    --color-status-success: var(--status-success);
+    --color-status-redirect: var(--status-redirect);
+}
+
+:root {
+    --background: oklch(1 0 0);
+    --foreground: oklch(0.14 0 0);
+    --card: oklch(1 0 0);
+    --card-foreground: oklch(0.14 0 0);
+    --popover: oklch(1 0 0);
+    --popover-foreground: oklch(0.14 0 0);
+
+    --primary: oklch(0.2 0 0);
+    --primary-foreground: oklch(0.98 0 0);
+
+    --secondary: oklch(0.96 0 0);
+    --secondary-foreground: oklch(0.2 0 0);
+    --muted: oklch(0.96 0 0);
+    --muted-foreground: oklch(0.55 0 0);
+    --accent: oklch(0.96 0 0);
+    --accent-foreground: oklch(0.2 0 0);
+    --destructive: oklch(0.3 0 0);
+    --destructive-foreground: oklch(0.98 0 0);
+    --border: oklch(0.92 0 0);
+    --input: oklch(0.92 0 0);
+    --ring: oklch(0.14 0 0);
+    --radius: 0.3rem;
+
+    --sidebar: oklch(0.98 0 0);
+    --sidebar-foreground: oklch(0.14 0 0);
+    --sidebar-border: oklch(0.92 0 0);
+
+    --panel-header: oklch(0.98 0 0);
+
+    --method-get: oklch(0.3 0 0);
+    --method-post: oklch(0.4 0 0);
+    --method-put: oklch(0.5 0 0);
+    --method-delete: oklch(0.6 0 0);
+    --method-patch: oklch(0.45 0 0);
+    --method-options: oklch(0.55 0 0);
+
+    --status-success: oklch(0.3 0 0);
+    --status-redirect: oklch(0.5 0 0);
+    --destructive: oklch(0.5998 0.2461 29.23);
+}
+
+.dark {
+    --background: oklch(0.15 0 0);
+    --foreground: oklch(0.98 0 0);
+    --card: oklch(0.15 0 0);
+    --card-foreground: oklch(0.98 0 0);
+    --popover: oklch(0.18 0 0);
+    --popover-foreground: oklch(0.98 0 0);
+
+    --primary: oklch(0.98 0 0);
+    --primary-foreground: oklch(0.15 0 0);
+
+    --secondary: oklch(0.22 0 0);
+    --secondary-foreground: oklch(0.98 0 0);
+    --muted: oklch(0.22 0 0);
+    --muted-foreground: oklch(0.65 0 0);
+    --accent: oklch(0.22 0 0);
+    --accent-foreground: oklch(0.98 0 0);
+    --destructive: oklch(0.8 0 0);
+    --destructive-foreground: oklch(0.15 0 0);
+    --border: oklch(0.26 0 0);
+    --input: oklch(0.26 0 0);
+    --ring: oklch(0.85 0 0);
+
+    --sidebar: oklch(0.18 0 0);
+    --sidebar-foreground: oklch(0.98 0 0);
+    --sidebar-border: oklch(0.15 0 0);
+
+    --panel-header: oklch(0.2 0 0);
+
+    --method-get: oklch(0.9 0 0);
+    --method-post: oklch(0.8 0 0);
+    --method-put: oklch(0.7 0 0);
+    --method-delete: oklch(0.6 0 0);
+    --method-patch: oklch(0.75 0 0);
+    --method-options: oklch(0.65 0 0);
+
+    --status-success: oklch(0.9 0 0);
+    --status-redirect: oklch(0.7 0 0);
+    --destructive: oklch(0.628 0.2577 29.23);
+}
+
+@layer base {
+    * {
+        @apply border-border outline-ring/50;
+    }
+    body {
+        @apply bg-background text-foreground;
+        font-family: var(--font-sans);
+        font-size: 13px;
+        -webkit-font-smoothing: antialiased;
+    }
+}
+
+html,
+body,
+#root {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+}
+
+::-webkit-scrollbar {
+    width: 12px;
+    height: 12px;
+}
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+::-webkit-scrollbar-thumb {
+    background-color: color-mix(
+        in oklch,
+        var(--muted-foreground) 30%,
+        transparent
+    );
+    border-radius: 6px;
+    border: 3px solid var(--background);
+}
+::-webkit-scrollbar-thumb:hover {
+    background-color: color-mix(
+        in oklch,
+        var(--muted-foreground) 50%,
+        transparent
+    );
+}
+
+.dark ::-webkit-scrollbar-thumb {
+    background-color: color-mix(
+        in oklch,
+        var(--muted-foreground) 40%,
+        transparent
+    );
+    border-color: var(--background);
+}
+.dark ::-webkit-scrollbar-thumb:hover {
+    background-color: color-mix(
+        in oklch,
+        var(--muted-foreground) 60%,
+        transparent
+    );
+}
+
+.bg-sidebar::-webkit-scrollbar-thumb {
+    border-color: var(--sidebar);
+}
+
+/* ── Sidebar ScrollArea fix ──────────────────────────────────────────────
+   Radix ScrollArea Viewport wraps children in an auto-generated div with
+   `display: table; min-width: 100%`. This forces content to expand to its
+   intrinsic text width, breaking sidebar contraction: the domain count badge
+   clips, rounded corners get cut, and the inset box-shadow border disappears.
+   Override it only inside the sidebar so other ScrollAreas keep defaults.   */
+
+.bg-sidebar [data-slot="scroll-area-viewport"] > div {
+    display: block !important;
+    min-width: 0 !important;
+}
+
+.bg-sidebar [data-slot="scroll-area-scrollbar"] {
+    display: none !important;
+}
+
+::selection {
+    background: var(--primary);
+    color: var(--primary-foreground);
+}
+
+[data-tauri-drag-region] {
+    -webkit-app-region: drag;
+}
+
+[data-tauri-drag-region] button,
+[data-tauri-drag-region] input,
+[data-tauri-drag-region] a {
+    -webkit-app-region: no-drag;
+}
+
+@layer utilities {
+    .animate-spinner-circle {
+        animation: spinner-circle-animate 1s step-start infinite;
+    }
+}
+
+@keyframes spinner-circle-animate {
+    0% { transform: rotate(0deg); }
+    10% { transform: rotate(36deg); }
+    20% { transform: rotate(72deg); }
+    30% { transform: rotate(108deg); }
+    40% { transform: rotate(144deg); }
+    50% { transform: rotate(180deg); }
+    60% { transform: rotate(216deg); }
+    70% { transform: rotate(252deg); }
+    80% { transform: rotate(288deg); }
+    90% { transform: rotate(324deg); }
+    100% { transform: rotate(360deg); }
+}

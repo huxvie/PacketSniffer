@@ -1,0 +1,35 @@
+# Build artifacts
+dist/
+build/
+cmake-build-*/
+
+# Dependencies
+node_modules/
+
+# Rust build
+src-tauri/target/
+src-tauri/gen/android/
+src-tauri/gen/apple/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.user
+CMakeUserPresets.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+bun-error.log*
