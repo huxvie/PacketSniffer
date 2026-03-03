@@ -49,9 +49,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: app-v__VERSION__
-          releaseName: 'App v__VERSION__'
-          releaseBody: 'See the assets to download this version and install.'
-          releaseDraft: true
+          tagName: ${{ github.ref_name }}
+          releaseName: 'PacketSniffer ${{ github.ref_name }}'
+          releaseBody: |
+            > [!CAUTION]
+            > This is a very early stage of the application. Things are subject to change and expect bugs. NOT tested outside of Windows
+
+            **Full Changelog**: https://github.com/WarFiN123/PacketSniffer/commits/${{ github.ref_name }}
+          releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
