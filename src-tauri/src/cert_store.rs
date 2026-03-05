@@ -542,7 +542,16 @@ async fn ensure_trusted_linux(
     let cert_path_str = cert_path.to_string_lossy().to_string();
 
     // Try to install the cert into the OS store
-    let os_store_success = if !std::path::Path::new(dest).exists() {
+    let mut needs_install = true;
+    if let Ok(installed_content) = std::fs::read_to_string(dest) {
+        if let Ok(current_content) = std::fs::read_to_string(cert_path) {
+            if installed_content == current_content {
+                needs_install = false;
+            }
+        }
+    }
+
+    let os_store_success = if needs_install {
         let status = Command::new("pkexec")
             .args([
                 "bash",
@@ -584,7 +593,17 @@ fn configure_firefox_enterprise_roots_linux(ca_cert_path: &str) {
         "/usr/lib/firefox-addons/distribution",
     ];
 
-    let cert_path_json = ca_cert_path.replace('\\', "\\\\").replace('"', "\\\"");
+    // Read the PEM and convert to pure base64 for Firefox policy (bypasses Snap filesystem restrictions)
+    let cert_content = std::fs::read_to_string(ca_cert_path).unwrap_or_default();
+    let cert_base64 = if cert_content.contains("BEGIN CERTIFICATE") {
+        cert_content
+            .lines()
+            .filter(|l| !l.starts_with("-----"))
+            .collect::<String>()
+    } else {
+        // Fallback to path if reading fails or not a standard PEM
+        ca_cert_path.replace('\\', "\\\\").replace('"', "\\\"")
+    };
 
     let policies_content = format!(
         r#"{{
@@ -597,7 +616,7 @@ fn configure_firefox_enterprise_roots_linux(ca_cert_path: &str) {
     }}
   }}
 }}"#,
-        cert_path_json
+        cert_base64
     );
 
     let mut script = String::new();
@@ -614,7 +633,7 @@ fn configure_firefox_enterprise_roots_linux(ca_cert_path: &str) {
 
     if let Ok(s) = status {
         if s.success() {
-            log::info!("Wrote Firefox policies.json to multiple system directories");
+            log::info!("Wrote Firefox policies.json (with base64 cert) to multiple system directories");
         }
     }
 
