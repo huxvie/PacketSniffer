@@ -7,6 +7,7 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import Spinner from "@/components/Spinner";
 
 interface UpdateDialogProps {
   open: boolean;
@@ -18,7 +19,7 @@ export default function UpdateDialog({
   onOpenChange,
 }: UpdateDialogProps) {
   const [status, setStatus] = useState<
-    "idle" | "checking" | "available" | "uptodate" | "error"
+    "idle" | "checking" | "available" | "uptodate" | "error" | "downloading"
   >("idle");
   const [version, setVersion] = useState("");
   const [error, setError] = useState("");
@@ -52,6 +53,7 @@ export default function UpdateDialog({
 
   const doUpdate = async () => {
     if (updateObj) {
+      setStatus("downloading");
       try {
         await updateObj.downloadAndInstall();
         const { relaunch } = await import("@tauri-apps/plugin-process");
@@ -76,9 +78,20 @@ export default function UpdateDialog({
         </DialogHeader>
         <div className="flex flex-col items-center justify-center py-6 min-h-30">
           {status === "checking" && (
-            <p className="text-sm font-medium text-text-1">
-              Checking for updates...
-            </p>
+            <div className="flex flex-col items-center gap-3">
+              <Spinner size={24} />
+              <p className="text-sm font-medium text-text-1">
+                Checking for updates...
+              </p>
+            </div>
+          )}
+          {status === "downloading" && (
+            <div className="flex flex-col items-center gap-3">
+              <Spinner size={24} />
+              <p className="text-sm font-medium text-text-1">
+                Downloading and installing update...
+              </p>
+            </div>
           )}
           {status === "uptodate" && (
             <p className="text-sm font-medium text-text-1">

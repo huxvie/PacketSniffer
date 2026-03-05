@@ -18,6 +18,7 @@ import {
 import HeadersTable from "./HeadersTable";
 import BodyViewer from "./BodyViewer";
 import MessagesTab from "./MessagesTab";
+import Spinner from "./Spinner";
 import type { HttpSession, WsMessage } from "@/types";
 import {
   parseQueryParams,
@@ -405,8 +406,9 @@ export default function DetailPanel({ session, wsMessages }: DetailPanelProps) {
             {resTab === "Messages" && <MessagesTab messages={wsMessages} />}
 
             {!session.complete && (
-              <div className="p-3 text-[11px] text-muted-foreground">
-                Waiting for response...
+              <div className="p-4 text-[11px] text-muted-foreground flex items-center gap-1">
+                <Spinner size={14} />
+                <span>Waiting for response...</span>
               </div>
             )}
           </ScrollArea>

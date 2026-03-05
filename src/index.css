@@ -156,7 +156,8 @@
         @apply border-border outline-ring/50;
     }
     body {
-        @apply bg-background text-foreground;
+        @apply text-foreground;
+        background-color: transparent !important;
         font-family: var(--font-sans);
         font-size: 13px;
         -webkit-font-smoothing: antialiased;
@@ -170,6 +171,7 @@ body,
     margin: 0;
     padding: 0;
     overflow: hidden;
+    background-color: transparent !important;
 }
 
 ::-webkit-scrollbar {

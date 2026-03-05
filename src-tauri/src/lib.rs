@@ -165,6 +165,13 @@ async fn open_in_postman(json: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+async fn check_ca_trusted() -> Result<bool, String> {
+    cert_store::check_ca_trusted()
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // ─── App Entry ───────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -207,6 +214,7 @@ pub fn run() {
             fix_proxy,
             set_proxy_port,
             install_ca_certificate,
+            check_ca_trusted,
             open_in_postman,
         ])
         .setup(|app| {

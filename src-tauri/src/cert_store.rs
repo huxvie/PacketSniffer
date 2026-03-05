@@ -29,6 +29,42 @@ pub async fn ensure_ca_trusted() -> Result<String, Box<dyn std::error::Error + S
     ));
 }
 
+/// Check if the CA is currently trusted by the OS without attempting to install it.
+pub async fn check_ca_trusted() -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    let ca =
+        CertificateAuthority::initialize(None).map_err(|e| format!("CA init failed: {}", e))?;
+    let _cert_path = ca.ca_cert_path();
+
+    #[cfg(target_os = "windows")]
+    {
+        let cert_path_str = _cert_path.to_string_lossy().to_string();
+        let file_thumbprint = get_cert_file_thumbprint(&cert_path_str)?;
+        let store_thumbprint = get_store_thumbprint();
+        if let Some(stored) = store_thumbprint {
+            return Ok(stored.eq_ignore_ascii_case(&file_thumbprint));
+        }
+        return Ok(false);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        let check = Command::new("security")
+            .args(["find-certificate", "-c", "PacketSniffer Root CA"])
+            .output()?;
+        return Ok(check.status.success());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let dest = "/usr/local/share/ca-certificates/packetsniffer-ca.crt";
+        return Ok(std::path::Path::new(dest).exists());
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    return Ok(true); // Assume yes on unknown OS to avoid popups
+}
+
 // ─── Windows ──────────────────────────────────────────────────────────────────
 
 /// Windows: compare thumbprint of installed cert vs cert file.
@@ -64,7 +100,7 @@ async fn ensure_trusted_windows(
             let _ = run_elevated(&format!("certutil -delstore Root {}", stored));
         }
         None => {
-            log::info!("No existing CA cert in store, installing...");
+            log::info!("No existing CA cert in store, installing");
         }
     }
 
@@ -503,32 +539,246 @@ async fn ensure_trusted_linux(
     use std::process::Command;
 
     let dest = "/usr/local/share/ca-certificates/packetsniffer-ca.crt";
-
-    // Check if already installed
-    if std::path::Path::new(dest).exists() {
-        return Ok("CA certificate is already trusted".to_string());
-    }
-
     let cert_path_str = cert_path.to_string_lossy().to_string();
 
-    // Use pkexec for privilege escalation
-    let status = Command::new("pkexec")
-        .args([
-            "bash",
-            "-c",
-            &format!(
-                "cp '{}' '{}' && update-ca-certificates",
-                cert_path_str, dest
-            ),
-        ])
-        .status()?;
+    // Try to install the cert into the OS store
+    let mut needs_install = true;
+    if let Ok(installed_content) = std::fs::read_to_string(dest) {
+        if let Ok(current_content) = std::fs::read_to_string(cert_path) {
+            if installed_content == current_content {
+                needs_install = false;
+            }
+        }
+    }
 
-    if status.success() {
+    let os_store_success = if needs_install {
+        let status = Command::new("pkexec")
+            .args([
+                "bash",
+                "-c",
+                &format!(
+                    "cp '{}' '{}' && update-ca-certificates",
+                    cert_path_str, dest
+                ),
+            ])
+            .status()?;
+        status.success()
+    } else {
+        true
+    };
+
+    // Configure Firefox Enterprise policies and profiles for Linux
+    configure_firefox_enterprise_roots_linux(&cert_path_str);
+
+    if os_store_success {
         Ok("CA certificate installed successfully".to_string())
     } else {
         Err(format!(
             "Failed to install CA certificate. Please manually copy {} to {} and run update-ca-certificates",
             cert_path_str, dest
         ).into())
+    }
+}
+
+/// Configure Firefox to trust our CA certificate on Linux.
+/// Writes to /etc/firefox/policies/policies.json and sets up user.js profiles
+#[cfg(target_os = "linux")]
+fn configure_firefox_enterprise_roots_linux(ca_cert_path: &str) {
+    use std::process::Command;
+
+    // 1. Install system-wide policy using pkexec
+    let policy_dirs = [
+        "/etc/firefox/policies",
+        "/usr/lib/firefox/distribution",
+        "/usr/lib/firefox-addons/distribution",
+    ];
+
+    // Read the PEM and convert to pure base64 for Firefox policy (bypasses Snap filesystem restrictions)
+    let cert_content = std::fs::read_to_string(ca_cert_path).unwrap_or_default();
+    let cert_base64 = if cert_content.contains("BEGIN CERTIFICATE") {
+        cert_content
+            .lines()
+            .filter(|l| !l.starts_with("-----"))
+            .collect::<String>()
+    } else {
+        // Fallback to path if reading fails or not a standard PEM
+        ca_cert_path.replace('\\', "\\\\").replace('"', "\\\"")
+    };
+
+    let policies_content = format!(
+        r#"{{
+  "policies": {{
+    "Certificates": {{
+      "ImportEnterpriseRoots": true,
+      "Install": [
+        "{}"
+      ]
+    }}
+  }}
+}}"#,
+        cert_base64
+    );
+
+    let mut script = String::new();
+    for dir in policy_dirs {
+        script.push_str(&format!(
+            "mkdir -p '{}' && echo '{}' > '{}/policies.json'; ",
+            dir, policies_content, dir
+        ));
+    }
+
+    let status = Command::new("pkexec")
+        .args(["bash", "-c", &script])
+        .status();
+
+    if let Ok(s) = status {
+        if s.success() {
+            log::info!("Wrote Firefox policies.json (with base64 cert) to multiple system directories");
+        } else {
+            log::warn!("pkexec failed to write policies.json. Exit status: {}", s);
+        }
+    }
+
+    // 2. Add cert to all NSS databases (cert9.db) using certutil as a fallback
+    install_firefox_nss_linux(ca_cert_path);
+
+    // 3. Fallback: Write user.js into all local Firefox profiles
+    configure_firefox_profiles_fallback_linux();
+}
+
+/// Fallback for Linux: attempts to install the CA certificate directly into Firefox's
+/// NSS database using `certutil` (from libnss3-tools).
+#[cfg(target_os = "linux")]
+fn install_firefox_nss_linux(ca_cert_path: &str) {
+    use std::process::Command;
+
+    // Check if certutil is installed
+    if Command::new("certutil").arg("-H").output().is_err() {
+        log::warn!("certutil not found. Please install libnss3-tools to automatically trust CA in Firefox via NSS.");
+        return;
+    }
+
+    let home = match std::env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+
+    let base_dirs = [
+        format!("{}/.mozilla/firefox", home),
+        format!("{}/snap/firefox/common/.mozilla/firefox", home),
+        format!("{}/.var/app/org.mozilla.firefox/.mozilla/firefox", home),
+    ];
+
+    for base in base_dirs {
+        let profiles_dir = std::path::Path::new(&base);
+        if !profiles_dir.exists() {
+            continue;
+        }
+
+        let entries = match std::fs::read_dir(profiles_dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            // A profile directory must have a cert9.db
+            if !path.join("cert9.db").exists() {
+                continue;
+            }
+
+            log::info!("Installing CA directly to NSS database in profile: {}", path.display());
+            
+            // certutil -d sql:/path/to/profile -A -t "C,," -n "PacketSniffer CA" -i /path/to/cert
+            let status = Command::new("certutil")
+                .args([
+                    "-d",
+                    &format!("sql:{}", path.display()),
+                    "-A",
+                    "-t",
+                    "C,,",
+                    "-n",
+                    "PacketSniffer Root CA",
+                    "-i",
+                    ca_cert_path,
+                ])
+                .status();
+
+            if let Ok(s) = status {
+                if !s.success() {
+                    log::warn!("certutil failed for profile {}", path.display());
+                }
+            } else {
+                log::warn!("Failed to execute certutil for profile {}", path.display());
+            }
+        }
+    }
+}
+
+/// Fallback for Linux: sets security.enterprise_roots.enabled in user.js for each Firefox profile.
+#[cfg(target_os = "linux")]
+fn configure_firefox_profiles_fallback_linux() {
+    let home = match std::env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+
+    let base_dirs = [
+        format!("{}/.mozilla/firefox", home),
+        format!("{}/snap/firefox/common/.mozilla/firefox", home),
+        format!("{}/.var/app/org.mozilla.firefox/.mozilla/firefox", home),
+    ];
+
+    let pref_line = r#"user_pref("security.enterprise_roots.enabled", true);"#;
+
+    for base in base_dirs {
+        let profiles_dir = std::path::Path::new(&base);
+        if !profiles_dir.exists() {
+            continue;
+        }
+
+        let entries = match std::fs::read_dir(profiles_dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            // A valid Firefox profile usually has a prefs.js or is ending with .default / .default-release
+            let user_js = path.join("user.js");
+
+            let mut content = if user_js.exists() {
+                std::fs::read_to_string(&user_js).unwrap_or_default()
+            } else {
+                String::new()
+            };
+
+            if content.contains("security.enterprise_roots.enabled") {
+                continue; // Already configured
+            }
+
+            if !content.is_empty() && !content.ends_with('\n') {
+                content.push('\n');
+            }
+            content.push_str(pref_line);
+            content.push('\n');
+
+            match std::fs::write(&user_js, &content) {
+                Ok(()) => {
+                    log::info!("Wrote enterprise_roots pref to {}", user_js.display());
+                }
+                Err(e) => {
+                    log::warn!("Failed to write {}: {}", user_js.display(), e);
+                }
+            }
+        }
     }
 }

@@ -66,3 +66,32 @@ jobs:
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
+
+      # Remove the .pub file from the release
+      - name: Remove .pub files from release
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const tag = context.payload.ref.replace('refs/tags/', '');
+            
+            // Get release by tag
+            const release = await github.rest.repos.getReleaseByTag({
+              owner,
+              repo,
+              tag
+            });
+            
+            // Find and delete any .pub assets
+            for (const asset of release.data.assets) {
+              if (asset.name.endsWith('.pub')) {
+                console.log(`Deleting ${asset.name}...`);
+                await github.rest.repos.deleteReleaseAsset({
+                  owner,
+                  repo,
+                  asset_id: asset.id
+                });
+              }
+            }

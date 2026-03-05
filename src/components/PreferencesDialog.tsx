@@ -44,6 +44,7 @@ export default function PreferencesDialog({
   onPortChange,
 }: PreferencesDialogProps) {
   const [caStatus, setCaStatus] = useState<string | null>(null);
+  const [installingCa, setInstallingCa] = useState(false);
   const [loading, setLoading] = useState<boolean>(false);
   const [port, setPort] = useState("8080");
 
@@ -61,12 +62,15 @@ export default function PreferencesDialog({
   }, [open]);
 
   const handleReinstallCA = async () => {
-    setCaStatus("Installing...");
+    setInstallingCa(true);
+    setCaStatus("Installing");
     try {
       await invoke("install_ca_certificate");
       setCaStatus("CA certificate installed successfully");
     } catch (e) {
       setCaStatus(`Error: ${e}`);
+    } finally {
+      setInstallingCa(false);
     }
   };
 
@@ -171,11 +175,17 @@ export default function PreferencesDialog({
               <span className="text-sm text-text-1">
                 Reinstall CA Certificate
               </span>
-              <Button variant="outline" size="xs" onClick={handleReinstallCA}>
-                Install
+              <Button
+                variant="outline"
+                size="xs"
+                onClick={handleReinstallCA}
+                disabled={installingCa}
+              >
+                {installingCa && <Spinner className="mr-2" size={14} />}
+                {installingCa ? "Installing" : "Install"}
               </Button>
             </div>
-            {caStatus && (
+            {caStatus && !installingCa && (
               <p className="text-xs text-muted-foreground">{caStatus}</p>
             )}
           </div>

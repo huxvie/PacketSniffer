@@ -1,5 +1,5 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from "react";
-import { save } from "@tauri-apps/plugin-dialog";
+import { save, confirm, message } from "@tauri-apps/plugin-dialog";
 import { writeTextFile } from "@tauri-apps/plugin-fs";
 import { invoke } from "@tauri-apps/api/core";
 import { useProxySessions, useWsMessages } from "./hooks/useTauriEvents";
@@ -20,6 +20,7 @@ import StatusBar from "./components/StatusBar";
 import PreferencesDialog from "./components/PreferencesDialog";
 import AboutDialog from "./components/AboutDialog";
 import UpdateDialog from "./components/UpdateDialog";
+import Spinner from "./components/Spinner";
 import type { HttpSession } from "./types";
 
 function matchesContentFilter(s: HttpSession, filter: ContentFilter): boolean {
@@ -104,6 +105,7 @@ export default function App() {
   const [aboutOpen, setAboutOpen] = useState(false);
   const [updateOpen, setUpdateOpen] = useState(false);
   const [proxyPort, setProxyPort] = useState(8080);
+  const [isInstallingCa, setIsInstallingCa] = useState(false);
 
   useEffect(() => {
     invoke<string>("get_proxy_status")
@@ -114,6 +116,39 @@ export default function App() {
         }
       })
       .catch(console.error);
+  }, []);
+
+  useEffect(() => {
+    // Check if CA certificate is trusted by the OS
+    invoke<boolean>("check_ca_trusted")
+      .then(async (isTrusted) => {
+        if (!isTrusted) {
+          const install = await confirm(
+            "The PacketSniffer CA Certificate is not trusted by your system. " +
+              "HTTPS interception will not work without it.\n\n" +
+              "Would you like to install it now? (Requires Administrator/Root privileges)",
+            { title: "Install CA Certificate", kind: "info" }
+          );
+
+          if (install) {
+            setIsInstallingCa(true);
+            try {
+              const result = await invoke<string>("install_ca_certificate");
+              setIsInstallingCa(false);
+              await message(result, { title: "Success", kind: "info" });
+            } catch (err: any) {
+              setIsInstallingCa(false);
+              await message(`Failed to install CA certificate:\n${err}`, {
+                title: "Error",
+                kind: "error",
+              });
+            }
+          }
+        }
+      })
+      .catch((err) => {
+        console.error("Failed to check CA trust status:", err);
+      });
   }, []);
 
   const handleExportSession = useCallback(async () => {
@@ -209,7 +244,7 @@ export default function App() {
     selectedId !== null ? (wsMessages.get(selectedId) ?? []) : [];
 
   return (
-    <main className="h-screen w-screen flex flex-col overflow-hidden bg-background">
+    <main className="h-screen w-screen flex flex-col overflow-hidden bg-transparent rounded-xl border border-border/20 shadow-2xl">
       <div className="h-full flex flex-col bg-bg-0">
         <Toolbar
           connected={connected}
@@ -312,6 +347,18 @@ export default function App() {
         <AboutDialog open={aboutOpen} onOpenChange={setAboutOpen} />
 
         <UpdateDialog open={updateOpen} onOpenChange={setUpdateOpen} />
+
+        {isInstallingCa && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+            <div className="flex flex-col items-center gap-4 p-6 bg-bg-1 border border-border rounded-lg shadow-lg">
+              <Spinner size={32} />
+              <p className="text-text-0 font-medium">Installing CA Certificate...</p>
+              <p className="text-text-1 text-sm text-center max-w-xs">
+                Please follow the system prompts to complete the installation.
+              </p>
+            </div>
+          </div>
+        )}
       </div>
     </main>
   );

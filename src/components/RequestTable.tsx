@@ -2,6 +2,7 @@ import { useRef, useEffect } from "react";
 import { cn } from "@/lib/utils";
 import { formatSize, formatTime, shortType } from "@/lib/utils";
 import type { HttpSession } from "@/types";
+import Spinner from "./Spinner";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -173,23 +174,32 @@ export default function RequestTable({
                       </td>
 
                       <td className="h-6 px-2 m-0 border-b border-b-border/40 group-[.selected]:border-b-primary border-r border-r-border/20 group-[.selected]:border-r-primary text-[11px] font-medium tabular-nums">
-                        {s.status || (s.complete ? "-" : "...")}{" "}
-                        {s.statusText && s.status !== 0 ? s.statusText : ""}
+                        {!s.complete && s.status === 0 ? (
+                          <div className="flex items-center gap-1.5 opacity-70">
+                            <Spinner size={10} />
+                            <span>...</span>
+                          </div>
+                        ) : (
+                          <>
+                            {s.status || (s.complete ? "-" : "...")}{" "}
+                            {s.statusText && s.status !== 0 ? s.statusText : ""}
+                          </>
+                        )}
                       </td>
 
                       {/* Type */}
-                      <td className="h-6 px-2 m-0 border-b border-b-border/40 group-[.selected]:border-b-primary text-[11px] truncate">
-                        {shortType(s.contentType)}
+                      <td className="h-6 px-2 m-0 border-b border-b-border/40 group-[.selected]:border-b-primary border-r border-r-border/20 group-[.selected]:border-r-primary text-[11px] truncate">
+                        {shortType(s.contentType) || (!s.complete ? <div className="flex items-center opacity-40 h-full"><Spinner size={10} /></div> : "")}
                       </td>
 
                       {/* Size */}
                       <td className="h-6 px-2 m-0 border-b border-b-border/40 group-[.selected]:border-b-primary border-r border-r-border/20 group-[.selected]:border-r-primary tabular-nums text-right whitespace-nowrap">
-                        {s.responseSize ? formatSize(s.responseSize) : ""}
+                        {s.responseSize ? formatSize(s.responseSize) : (!s.complete ? <div className="flex items-center justify-end opacity-40 h-full"><Spinner size={10} /></div> : "")}
                       </td>
 
                       {/* Duration */}
                       <td className="h-6 px-2 m-0 border-b border-b-border/40 group-[.selected]:border-b-primary tabular-nums text-right whitespace-nowrap">
-                        {s.duration ? formatTime(s.duration) : ""}
+                        {s.duration ? formatTime(s.duration) : (!s.complete ? <div className="flex items-center justify-end opacity-40 h-full"><Spinner size={10} /></div> : "")}
                       </td>
                     </tr>
                   </ContextMenuTrigger>
