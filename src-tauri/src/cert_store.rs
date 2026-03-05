@@ -33,11 +33,11 @@ pub async fn ensure_ca_trusted() -> Result<String, Box<dyn std::error::Error + S
 pub async fn check_ca_trusted() -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     let ca =
         CertificateAuthority::initialize(None).map_err(|e| format!("CA init failed: {}", e))?;
-    let cert_path = ca.ca_cert_path();
-    let cert_path_str = cert_path.to_string_lossy().to_string();
+    let _cert_path = ca.ca_cert_path();
 
     #[cfg(target_os = "windows")]
     {
+        let cert_path_str = _cert_path.to_string_lossy().to_string();
         let file_thumbprint = get_cert_file_thumbprint(&cert_path_str)?;
         let store_thumbprint = get_store_thumbprint();
         if let Some(stored) = store_thumbprint {
@@ -558,7 +558,7 @@ async fn ensure_trusted_linux(
         true
     };
 
-    // Configure Firefox Enterprise policies for Linux
+    // Configure Firefox Enterprise policies and profiles for Linux
     configure_firefox_enterprise_roots_linux(&cert_path_str);
 
     if os_store_success {
@@ -572,15 +572,18 @@ async fn ensure_trusted_linux(
 }
 
 /// Configure Firefox to trust our CA certificate on Linux.
-/// Writes to /etc/firefox/policies/policies.json
+/// Writes to /etc/firefox/policies/policies.json and sets up user.js profiles
 #[cfg(target_os = "linux")]
 fn configure_firefox_enterprise_roots_linux(ca_cert_path: &str) {
     use std::process::Command;
 
-    let policy_dir = "/etc/firefox/policies";
-    let policy_file = format!("{}/policies.json", policy_dir);
+    // 1. Install system-wide policy using pkexec
+    let policy_dirs = [
+        "/etc/firefox/policies",
+        "/usr/lib/firefox/distribution",
+        "/usr/lib/firefox-addons/distribution",
+    ];
 
-    // Normalize cert path for JSON
     let cert_path_json = ca_cert_path.replace('\\', "\\\\").replace('"', "\\\"");
 
     let policies_content = format!(
@@ -597,30 +600,88 @@ fn configure_firefox_enterprise_roots_linux(ca_cert_path: &str) {
         cert_path_json
     );
 
-    // Check if we need to update it
-    if let Ok(existing) = std::fs::read_to_string(&policy_file) {
-        if existing.contains(&cert_path_json) && existing.contains("ImportEnterpriseRoots") {
-            log::debug!("Firefox policies.json already configured on Linux");
-            return;
-        }
+    let mut script = String::new();
+    for dir in policy_dirs {
+        script.push_str(&format!(
+            "mkdir -p '{}' && echo '{}' > '{}/policies.json'; ",
+            dir, policies_content, dir
+        ));
     }
-
-    // Use pkexec to write the file since /etc/ requires root
-    let script = format!(
-        "mkdir -p '{}' && echo '{}' > '{}'",
-        policy_dir, policies_content, policy_file
-    );
 
     let status = Command::new("pkexec")
         .args(["bash", "-c", &script])
         .status();
 
-    match status {
-        Ok(s) if s.success() => {
-            log::info!("Wrote Firefox policies.json to {}", policy_file);
+    if let Ok(s) = status {
+        if s.success() {
+            log::info!("Wrote Firefox policies.json to multiple system directories");
         }
-        _ => {
-            log::warn!("Failed to write Firefox policies.json at {}", policy_file);
+    }
+
+    // 2. Fallback: Write user.js into all local Firefox profiles
+    configure_firefox_profiles_fallback_linux();
+}
+
+/// Fallback for Linux: sets security.enterprise_roots.enabled in user.js for each Firefox profile.
+#[cfg(target_os = "linux")]
+fn configure_firefox_profiles_fallback_linux() {
+    let home = match std::env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+
+    let base_dirs = [
+        format!("{}/.mozilla/firefox", home),
+        format!("{}/snap/firefox/common/.mozilla/firefox", home),
+        format!("{}/.var/app/org.mozilla.firefox/.mozilla/firefox", home),
+    ];
+
+    let pref_line = r#"user_pref("security.enterprise_roots.enabled", true);"#;
+
+    for base in base_dirs {
+        let profiles_dir = std::path::Path::new(&base);
+        if !profiles_dir.exists() {
+            continue;
+        }
+
+        let entries = match std::fs::read_dir(profiles_dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            // A valid Firefox profile usually has a prefs.js or is ending with .default / .default-release
+            let user_js = path.join("user.js");
+
+            let mut content = if user_js.exists() {
+                std::fs::read_to_string(&user_js).unwrap_or_default()
+            } else {
+                String::new()
+            };
+
+            if content.contains("security.enterprise_roots.enabled") {
+                continue; // Already configured
+            }
+
+            if !content.is_empty() && !content.ends_with('\n') {
+                content.push('\n');
+            }
+            content.push_str(pref_line);
+            content.push('\n');
+
+            match std::fs::write(&user_js, &content) {
+                Ok(()) => {
+                    log::info!("Wrote enterprise_roots pref to {}", user_js.display());
+                }
+                Err(e) => {
+                    log::warn!("Failed to write {}: {}", user_js.display(), e);
+                }
+            }
         }
     }
 }

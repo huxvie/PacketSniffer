@@ -55,16 +55,26 @@ export default function Toolbar({
     }
   };
 
+  const handleMouseDown = (e: React.MouseEvent) => {
+    if (
+      e.buttons === 1 &&
+      (e.target as HTMLElement).hasAttribute("data-tauri-drag-region")
+    ) {
+      getCurrentWindow().startDragging();
+    }
+  };
+
   return (
     <div
       className="flex flex-col bg-background border-b border-border select-none shrink-0"
       data-tauri-drag-region
+      onMouseDown={handleMouseDown}
     >
       {/* Top row: Menu bar + Window controls area (macOS style space or Windows controls space depending on OS) */}
-      <div className="flex items-center justify-between h-9 px-2 gap-2">
-        <div className="flex items-center gap-2">
+      <div className="flex items-center justify-between h-9 px-2 gap-2" data-tauri-drag-region>
+        <div className="flex items-center gap-2" data-tauri-drag-region>
           {/* Logo / Brand */}
-          <div className="font-bold text-sm px-2 text-primary tracking-tight flex items-center gap-1.5 font-chakra">
+          <div className="font-bold text-sm px-2 text-primary tracking-tight flex items-center gap-1.5 font-chakra pointer-events-none">
             <img src="/logo.png" alt="Logo" className="w-4 h-4 rounded-sm" />
             PacketSniffer
           </div>
