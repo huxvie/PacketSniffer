@@ -29,6 +29,42 @@ pub async fn ensure_ca_trusted() -> Result<String, Box<dyn std::error::Error + S
     ));
 }
 
+/// Check if the CA is currently trusted by the OS without attempting to install it.
+pub async fn check_ca_trusted() -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    let ca =
+        CertificateAuthority::initialize(None).map_err(|e| format!("CA init failed: {}", e))?;
+    let cert_path = ca.ca_cert_path();
+    let cert_path_str = cert_path.to_string_lossy().to_string();
+
+    #[cfg(target_os = "windows")]
+    {
+        let file_thumbprint = get_cert_file_thumbprint(&cert_path_str)?;
+        let store_thumbprint = get_store_thumbprint();
+        if let Some(stored) = store_thumbprint {
+            return Ok(stored.eq_ignore_ascii_case(&file_thumbprint));
+        }
+        return Ok(false);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        let check = Command::new("security")
+            .args(["find-certificate", "-c", "PacketSniffer Root CA"])
+            .output()?;
+        return Ok(check.status.success());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let dest = "/usr/local/share/ca-certificates/packetsniffer-ca.crt";
+        return Ok(std::path::Path::new(dest).exists());
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    return Ok(true); // Assume yes on unknown OS to avoid popups
+}
+
 // ─── Windows ──────────────────────────────────────────────────────────────────
 
 /// Windows: compare thumbprint of installed cert vs cert file.
@@ -64,7 +100,7 @@ async fn ensure_trusted_windows(
             let _ = run_elevated(&format!("certutil -delstore Root {}", stored));
         }
         None => {
-            log::info!("No existing CA cert in store, installing...");
+            log::info!("No existing CA cert in store, installing");
         }
     }
 
@@ -503,32 +539,88 @@ async fn ensure_trusted_linux(
     use std::process::Command;
 
     let dest = "/usr/local/share/ca-certificates/packetsniffer-ca.crt";
-
-    // Check if already installed
-    if std::path::Path::new(dest).exists() {
-        return Ok("CA certificate is already trusted".to_string());
-    }
-
     let cert_path_str = cert_path.to_string_lossy().to_string();
 
-    // Use pkexec for privilege escalation
-    let status = Command::new("pkexec")
-        .args([
-            "bash",
-            "-c",
-            &format!(
-                "cp '{}' '{}' && update-ca-certificates",
-                cert_path_str, dest
-            ),
-        ])
-        .status()?;
+    // Try to install the cert into the OS store
+    let os_store_success = if !std::path::Path::new(dest).exists() {
+        let status = Command::new("pkexec")
+            .args([
+                "bash",
+                "-c",
+                &format!(
+                    "cp '{}' '{}' && update-ca-certificates",
+                    cert_path_str, dest
+                ),
+            ])
+            .status()?;
+        status.success()
+    } else {
+        true
+    };
 
-    if status.success() {
+    // Configure Firefox Enterprise policies for Linux
+    configure_firefox_enterprise_roots_linux(&cert_path_str);
+
+    if os_store_success {
         Ok("CA certificate installed successfully".to_string())
     } else {
         Err(format!(
             "Failed to install CA certificate. Please manually copy {} to {} and run update-ca-certificates",
             cert_path_str, dest
         ).into())
+    }
+}
+
+/// Configure Firefox to trust our CA certificate on Linux.
+/// Writes to /etc/firefox/policies/policies.json
+#[cfg(target_os = "linux")]
+fn configure_firefox_enterprise_roots_linux(ca_cert_path: &str) {
+    use std::process::Command;
+
+    let policy_dir = "/etc/firefox/policies";
+    let policy_file = format!("{}/policies.json", policy_dir);
+
+    // Normalize cert path for JSON
+    let cert_path_json = ca_cert_path.replace('\\', "\\\\").replace('"', "\\\"");
+
+    let policies_content = format!(
+        r#"{{
+  "policies": {{
+    "Certificates": {{
+      "ImportEnterpriseRoots": true,
+      "Install": [
+        "{}"
+      ]
+    }}
+  }}
+}}"#,
+        cert_path_json
+    );
+
+    // Check if we need to update it
+    if let Ok(existing) = std::fs::read_to_string(&policy_file) {
+        if existing.contains(&cert_path_json) && existing.contains("ImportEnterpriseRoots") {
+            log::debug!("Firefox policies.json already configured on Linux");
+            return;
+        }
+    }
+
+    // Use pkexec to write the file since /etc/ requires root
+    let script = format!(
+        "mkdir -p '{}' && echo '{}' > '{}'",
+        policy_dir, policies_content, policy_file
+    );
+
+    let status = Command::new("pkexec")
+        .args(["bash", "-c", &script])
+        .status();
+
+    match status {
+        Ok(s) if s.success() => {
+            log::info!("Wrote Firefox policies.json to {}", policy_file);
+        }
+        _ => {
+            log::warn!("Failed to write Firefox policies.json at {}", policy_file);
+        }
     }
 }

@@ -36,6 +36,7 @@ export default function StatusBar({
 }: StatusBarProps) {
   const isFiltered = filteredCount !== totalCount;
   const [proxyOverridden, setProxyOverridden] = useState(false);
+  const [fixingProxy, setFixingProxy] = useState(false);
 
   // Note: Backend emits 'proxy_overridden' event if detected.
   useEffect(() => {
@@ -66,12 +67,15 @@ export default function StatusBar({
   };
 
   const handleFixProxy = async () => {
+    setFixingProxy(true);
     try {
       await invoke("fix_proxy");
       setProxyOverridden(false);
       // Wait a moment then check if it's still overridden (handled by backend polling)
     } catch (e) {
       console.error("Failed to fix proxy:", e);
+    } finally {
+      setFixingProxy(false);
     }
   };
 
@@ -84,10 +88,15 @@ export default function StatusBar({
             variant="ghost"
             size="xs"
             onClick={handleFixProxy}
+            disabled={fixingProxy}
             className="h-6 px-2 rounded bg-destructive/10 text-destructive hover:bg-destructive/20 hover:text-destructive border border-destructive/20 transition-colors gap-1.5"
           >
-            <AlertTriangle className="size-3.5" />
-            Proxy Overridden (Fix)
+            {fixingProxy ? (
+              <Spinner size={14} className="text-destructive" />
+            ) : (
+              <AlertTriangle className="size-3.5" />
+            )}
+            {fixingProxy ? "Fixing..." : "Proxy Overridden (Fix)"}
           </Button>
         )}
       </div>
