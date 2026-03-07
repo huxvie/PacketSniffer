@@ -55,12 +55,16 @@ export default function Toolbar({
     }
   };
 
-  const handleMouseDown = (e: React.MouseEvent) => {
+  const handleMouseDown = async (e: React.MouseEvent) => {
     if (
       e.buttons === 1 &&
       (e.target as HTMLElement).hasAttribute("data-tauri-drag-region")
     ) {
-      getCurrentWindow().startDragging();
+      try {
+        await getCurrentWindow().startDragging();
+      } catch (err) {
+        console.error("Failed to start window dragging:", err);
+      }
     }
   };
 

@@ -134,14 +134,14 @@ export default function App() {
             setIsInstallingCa(true);
             try {
               const result = await invoke<string>("install_ca_certificate");
-              setIsInstallingCa(false);
               await message(result, { title: "Success", kind: "info" });
             } catch (err: any) {
-              setIsInstallingCa(false);
               await message(`Failed to install CA certificate:\n${err}`, {
                 title: "Error",
                 kind: "error",
               });
+            } finally {
+              setIsInstallingCa(false);
             }
           }
         }

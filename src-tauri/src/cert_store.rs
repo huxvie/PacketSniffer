@@ -57,8 +57,21 @@ pub async fn check_ca_trusted() -> Result<bool, Box<dyn std::error::Error + Send
 
     #[cfg(target_os = "linux")]
     {
+        use std::fs;
+        use std::path::Path;
+
         let dest = "/usr/local/share/ca-certificates/packetsniffer-ca.crt";
-        return Ok(std::path::Path::new(dest).exists());
+        let dest_path = Path::new(dest);
+
+        // Only report trusted if the destination file exists and matches the current CA cert.
+        if !dest_path.exists() {
+            return Ok(false);
+        }
+
+        let src_bytes = fs::read(&_cert_path)?;
+        let dest_bytes = fs::read(dest_path)?;
+
+        return Ok(src_bytes == dest_bytes);
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
@@ -593,17 +606,7 @@ fn configure_firefox_enterprise_roots_linux(ca_cert_path: &str) {
         "/usr/lib/firefox-addons/distribution",
     ];
 
-    // Read the PEM and convert to pure base64 for Firefox policy (bypasses Snap filesystem restrictions)
-    let cert_content = std::fs::read_to_string(ca_cert_path).unwrap_or_default();
-    let cert_base64 = if cert_content.contains("BEGIN CERTIFICATE") {
-        cert_content
-            .lines()
-            .filter(|l| !l.starts_with("-----"))
-            .collect::<String>()
-    } else {
-        // Fallback to path if reading fails or not a standard PEM
-        ca_cert_path.replace('\\', "\\\\").replace('"', "\\\"")
-    };
+    let dest = "/usr/local/share/ca-certificates/packetsniffer-ca.crt";
 
     let policies_content = format!(
         r#"{{
@@ -616,27 +619,35 @@ fn configure_firefox_enterprise_roots_linux(ca_cert_path: &str) {
     }}
   }}
 }}"#,
-        cert_base64
+        dest
     );
 
-    let mut script = String::new();
-    for dir in policy_dirs {
-        script.push_str(&format!(
-            "mkdir -p '{}' && echo '{}' > '{}/policies.json'; ",
-            dir, policies_content, dir
-        ));
-    }
-
-    let status = Command::new("pkexec")
-        .args(["bash", "-c", &script])
-        .status();
-
-    if let Ok(s) = status {
-        if s.success() {
-            log::info!("Wrote Firefox policies.json (with base64 cert) to multiple system directories");
-        } else {
-            log::warn!("pkexec failed to write policies.json. Exit status: {}", s);
+    // Write policy JSON to a temporary file, then copy it to target dirs with pkexec
+    let temp_dir = std::env::temp_dir();
+    let temp_policy_path = temp_dir.join("packetsniffer-firefox-policies.json");
+    if std::fs::write(&temp_policy_path, &policies_content).is_ok() {
+        let temp_path_str = temp_policy_path.to_string_lossy().to_string();
+        let mut script = String::new();
+        for dir in policy_dirs {
+            script.push_str(&format!(
+                "mkdir -p '{}' && cp '{}' '{}/policies.json'; ",
+                dir, temp_path_str, dir
+            ));
         }
+
+        let status = Command::new("pkexec")
+            .args(["bash", "-c", &script])
+            .status();
+
+        if let Ok(s) = status {
+            if s.success() {
+                log::info!("Wrote Firefox policies.json to multiple system directories");
+            } else {
+                log::warn!("pkexec failed to write policies.json. Exit status: {}", s);
+            }
+        }
+        
+        let _ = std::fs::remove_file(temp_policy_path);
     }
 
     // 2. Add cert to all NSS databases (cert9.db) using certutil as a fallback
