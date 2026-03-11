@@ -39,6 +39,11 @@ jobs:
       - name: install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
+      - name: install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
       - name: Bump versions, commit, and tag
         id: bump
         run: |
@@ -59,7 +64,7 @@ jobs:
 
           # 4. Update lockfiles
           bun install
-          cd src-tauri && cargo check && cd ..
+          (cd src-tauri && cargo check)
 
           # 5. Commit and tag
           git add package.json bun.lock src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
