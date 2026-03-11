@@ -6,6 +6,56 @@
 use crate::proxy::ca::CertificateAuthority;
 use std::path::PathBuf;
 
+/// Returns a list of package names that are missing and needed for full functionality.
+pub fn check_missing_dependencies() -> Vec<String> {
+    #[allow(unused_mut)]
+    let mut missing = Vec::new();
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::process::Command;
+        if Command::new("certutil").arg("-H").output().is_err() {
+            missing.push("libnss3-tools".to_string());
+        }
+    }
+
+    missing
+}
+
+/// Attempt to install a system package by name. Returns Ok on success.
+#[cfg(target_os = "linux")]
+pub fn install_package(package: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    use std::process::Command;
+
+    // Try apt (Debian/Ubuntu), then dnf (Fedora), then pacman (Arch)
+    let managers: &[(&str, &[&str])] = &[
+        ("apt-get", &["install", "-y", package]),
+        ("dnf", &["install", "-y", package]),
+        ("pacman", &["-S", "--noconfirm", package]),
+    ];
+
+    for (mgr, args) in managers {
+        if Command::new("which").arg(mgr).output().map(|o| o.status.success()).unwrap_or(false) {
+            let status = Command::new("pkexec")
+                .arg(mgr)
+                .args(*args)
+                .status()?;
+            if status.success() {
+                return Ok(format!("{} installed successfully", package));
+            } else {
+                return Err(format!("{} install failed (exit code: {})", package, status).into());
+            }
+        }
+    }
+
+    Err("No supported package manager found (apt-get, dnf, or pacman)".into())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn install_package(_package: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    Ok("No packages to install on this platform".to_string())
+}
+
 /// Ensure the CA certificate is trusted by the OS.
 /// Returns a status message.
 pub async fn ensure_ca_trusted() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
@@ -654,10 +704,10 @@ fn configure_firefox_enterprise_roots_linux(ca_cert_path: &str) {
 
     match &status {
         Ok(s) if s.success() => {
-            log::info!("Wrote Firefox policies.json (cert path: {}) to system directories", escaped_path);
+            log::info!("Wrote Firefox policies.json to system directories");
         }
         Ok(s) => {
-            log::warn!("pkexec failed to write policies.json. Exit status: {}", s);
+            log::warn!("Failed to write policies.json (exit {})", s);
         }
         Err(e) => {
             log::warn!("Failed to run pkexec for policies.json: {}", e);
@@ -677,13 +727,13 @@ fn configure_firefox_enterprise_roots_linux(ca_cert_path: &str) {
 /// NSS database using `certutil` (from libnss3-tools). This is the most reliable
 /// method for Firefox cert trust — it works across native, Snap, and Flatpak installs.
 #[cfg(target_os = "linux")]
-fn install_firefox_nss_linux(ca_cert_path: &str) {
+fn install_firefox_nss_linux(ca_cert_path: &str) -> bool {
     use std::process::Command;
 
-    // Check if certutil is installed
+    // Check if certutil is installed (from libnss3-tools)
     if Command::new("certutil").arg("-H").output().is_err() {
-        log::warn!("certutil not found. Please install libnss3-tools to automatically trust CA in Firefox via NSS.");
-        return;
+        log::warn!("certutil (libnss3-tools) not found — skipping NSS cert install");
+        return false;
     }
 
     let home = match std::env::var("HOME") {
@@ -719,7 +769,7 @@ fn install_firefox_nss_linux(ca_cert_path: &str) {
                 continue;
             }
 
-            log::info!("Installing CA directly to NSS database in profile: {}", path.display());
+            log::info!("Installing CA to NSS database in Firefox profile");
 
             // Delete any existing cert with the same nickname first to allow re-installs
             let _ = Command::new("certutil")
@@ -758,6 +808,7 @@ fn install_firefox_nss_linux(ca_cert_path: &str) {
             }
         }
     }
+    true
 }
 
 /// Fallback for Linux: sets security.enterprise_roots.enabled in user.js for each Firefox profile.

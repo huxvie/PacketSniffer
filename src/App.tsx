@@ -1,5 +1,5 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from "react";
-import { save, confirm, message } from "@tauri-apps/plugin-dialog";
+import { save } from "@tauri-apps/plugin-dialog";
 import { writeTextFile } from "@tauri-apps/plugin-fs";
 import { invoke } from "@tauri-apps/api/core";
 import { useProxySessions, useWsMessages } from "./hooks/useTauriEvents";
@@ -20,6 +20,8 @@ import StatusBar from "./components/StatusBar";
 import PreferencesDialog from "./components/PreferencesDialog";
 import AboutDialog from "./components/AboutDialog";
 import UpdateDialog from "./components/UpdateDialog";
+import CaInstallDialog from "./components/CaInstallDialog";
+import DependencyDialog from "./components/DependencyDialog";
 import Spinner from "./components/Spinner";
 import type { HttpSession } from "./types";
 
@@ -113,6 +115,9 @@ export default function App() {
   const [updateOpen, setUpdateOpen] = useState(false);
   const [proxyPort, setProxyPort] = useState(8080);
   const [isInstallingCa, setIsInstallingCa] = useState(false);
+  const [showCaDialog, setShowCaDialog] = useState(false);
+  const [showDepDialog, setShowDepDialog] = useState(false);
+  const [missingDeps, setMissingDeps] = useState<string[]>([]);
 
   useEffect(() => {
     invoke<string>("get_proxy_status")
@@ -122,40 +127,30 @@ export default function App() {
           setProxyPort(parseInt(match[1], 10));
         }
       })
-      .catch(console.error);
+      .catch(() => {});
   }, []);
 
+  // Check for missing system dependencies
   useEffect(() => {
-    // Check if CA certificate is trusted by the OS
-    invoke<boolean>("check_ca_trusted")
-      .then(async (isTrusted) => {
-        if (!isTrusted) {
-          const install = await confirm(
-            "The PacketSniffer CA Certificate is not trusted by your system. " +
-              "HTTPS interception will not work without it.\n\n" +
-              "Would you like to install it now? (Requires Administrator/Root privileges)",
-            { title: "Install CA Certificate", kind: "info" }
-          );
-
-          if (install) {
-            setIsInstallingCa(true);
-            try {
-              const result = await invoke<string>("install_ca_certificate");
-              await message(result, { title: "Success", kind: "info" });
-            } catch (err: any) {
-              await message(`Failed to install CA certificate:\n${err}`, {
-                title: "Error",
-                kind: "error",
-              });
-            } finally {
-              setIsInstallingCa(false);
-            }
-          }
+    invoke<string[]>("check_missing_deps")
+      .then((deps) => {
+        if (deps.length > 0) {
+          setMissingDeps(deps);
+          setShowDepDialog(true);
         }
       })
-      .catch((err) => {
-        console.error("Failed to check CA trust status:", err);
-      });
+      .catch(() => {});
+  }, []);
+
+  // Check if CA certificate is trusted — show in-app dialog instead of system one
+  useEffect(() => {
+    invoke<boolean>("check_ca_trusted")
+      .then((isTrusted) => {
+        if (!isTrusted) {
+          setShowCaDialog(true);
+        }
+      })
+      .catch(() => {});
   }, []);
 
   const handleExportSession = useCallback(async () => {
@@ -259,6 +254,7 @@ export default function App() {
           onOpenUpdate={() => setUpdateOpen(true)}
           onOpenAbout={() => setAboutOpen(true)}
           onExportSession={handleExportSession}
+          onInstallCa={() => setShowCaDialog(true)}
           textFilter={textFilter}
           onTextChange={setTextFilter}
         />
@@ -354,6 +350,17 @@ export default function App() {
         <AboutDialog open={aboutOpen} onOpenChange={setAboutOpen} />
 
         <UpdateDialog open={updateOpen} onOpenChange={setUpdateOpen} />
+
+        <CaInstallDialog
+          open={showCaDialog}
+          onOpenChange={setShowCaDialog}
+        />
+
+        <DependencyDialog
+          open={showDepDialog}
+          onOpenChange={setShowDepDialog}
+          missingDeps={missingDeps}
+        />
 
         {isInstallingCa && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">

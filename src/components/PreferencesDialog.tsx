@@ -11,7 +11,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
-import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -19,11 +18,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Check } from "lucide-react";
+import { Check, ShieldCheck } from "lucide-react";
 import Spinner from "./Spinner";
 import {
   InputGroup,
-  InputGroupButton,
   InputGroupAddon,
   InputGroupInput,
 } from "./ui/input-group";
@@ -47,6 +45,7 @@ export default function PreferencesDialog({
   const [installingCa, setInstallingCa] = useState(false);
   const [loading, setLoading] = useState<boolean>(false);
   const [port, setPort] = useState("8080");
+  const [portSaved, setPortSaved] = useState(false);
 
   useEffect(() => {
     if (open) {
@@ -57,16 +56,18 @@ export default function PreferencesDialog({
             setPort(match[1]);
           }
         })
-        .catch(console.error);
+        .catch(() => {});
+      setCaStatus(null);
+      setPortSaved(false);
     }
   }, [open]);
 
   const handleReinstallCA = async () => {
     setInstallingCa(true);
-    setCaStatus("Installing");
+    setCaStatus("Installing...");
     try {
-      await invoke("install_ca_certificate");
-      setCaStatus("CA certificate installed successfully");
+      const result = await invoke<string>("install_ca_certificate");
+      setCaStatus(result);
     } catch (e) {
       setCaStatus(`Error: ${e}`);
     } finally {
@@ -76,19 +77,19 @@ export default function PreferencesDialog({
 
   const handleSavePort = async () => {
     setLoading(true);
+    setPortSaved(false);
     try {
       const parsedPort = parseInt(port, 10);
       if (isNaN(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
-        alert("Invalid port number");
+        setCaStatus("Invalid port number (1–65535)");
         return;
       }
       await invoke("set_proxy_port", { port: parsedPort });
-      console.log("Port changed to", parsedPort);
       onPortChange?.(parsedPort);
-      alert(`Port changed to ${parsedPort}`);
+      setPortSaved(true);
+      setTimeout(() => setPortSaved(false), 2000);
     } catch (e) {
-      console.error(e);
-      alert(`Failed to change port: ${e}`);
+      setCaStatus(`Port change failed: ${e}`);
     } finally {
       setLoading(false);
     }
@@ -121,14 +122,19 @@ export default function PreferencesDialog({
                   type="number"
                   min="1"
                   max="65535"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") handleSavePort();
+                  }}
                 />
                 <InputGroupAddon
                   align={"inline-end"}
                   onClick={handleSavePort}
-                  className={loading ? "cursor-wait" : "cursor-auto"}
+                  className={loading ? "cursor-wait" : "cursor-pointer"}
                 >
                   {loading ? (
                     <Spinner />
+                  ) : portSaved ? (
+                    <Check className="size-4 text-green-500" />
                   ) : (
                     <Check className="size-4 hover:text-primary" />
                   )}
@@ -172,9 +178,12 @@ export default function PreferencesDialog({
           </h3>
           <div className="flex flex-col gap-2">
             <div className="flex items-center justify-between">
-              <span className="text-sm text-text-1">
-                Reinstall CA Certificate
-              </span>
+              <div className="flex items-center gap-1.5">
+                <ShieldCheck className="size-3.5 text-muted-foreground" />
+                <span className="text-sm text-text-1">
+                  CA Certificate
+                </span>
+              </div>
               <Button
                 variant="outline"
                 size="xs"
@@ -182,11 +191,13 @@ export default function PreferencesDialog({
                 disabled={installingCa}
               >
                 {installingCa && <Spinner className="mr-2" size={14} />}
-                {installingCa ? "Installing" : "Install"}
+                {installingCa ? "Installing" : "Reinstall"}
               </Button>
             </div>
             {caStatus && !installingCa && (
-              <p className="text-xs text-muted-foreground">{caStatus}</p>
+              <p className={`text-xs ${caStatus.startsWith("Error") ? "text-destructive" : "text-muted-foreground"}`}>
+                {caStatus}
+              </p>
             )}
           </div>
         </div>

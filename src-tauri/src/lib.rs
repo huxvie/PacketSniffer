@@ -172,6 +172,16 @@ async fn check_ca_trusted() -> Result<bool, String> {
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn check_missing_deps() -> Vec<String> {
+    cert_store::check_missing_dependencies()
+}
+
+#[tauri::command]
+async fn install_dependency(package: String) -> Result<String, String> {
+    cert_store::install_package(&package).map_err(|e| e.to_string())
+}
+
 // ─── App Entry ───────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -215,6 +225,8 @@ pub fn run() {
             set_proxy_port,
             install_ca_certificate,
             check_ca_trusted,
+            check_missing_deps,
+            install_dependency,
             open_in_postman,
         ])
         .setup(|app| {
