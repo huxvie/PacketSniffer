@@ -8,8 +8,7 @@ node_modules/
 
 # Rust build
 src-tauri/target/
-src-tauri/gen/android/
-src-tauri/gen/apple/
+src-tauri/gen
 
 # Environment files
 .env
