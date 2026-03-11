@@ -738,7 +738,7 @@ fn install_firefox_nss_linux(ca_cert_path: &str) -> bool {
 
     let home = match std::env::var("HOME") {
         Ok(h) => h,
-        Err(_) => return,
+        Err(_) => return false,
     };
 
     let base_dirs = [
