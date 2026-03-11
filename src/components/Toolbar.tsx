@@ -1,7 +1,6 @@
 import { Search, X } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { message } from "@tauri-apps/plugin-dialog";
 import {
   Menubar,
   MenubarContent,
@@ -18,49 +17,40 @@ interface ToolbarProps {
   onOpenUpdate: () => void;
   onOpenAbout: () => void;
   onExportSession: () => void;
+  onInstallCa: () => void;
   textFilter: string;
   onTextChange: (value: string) => void;
 }
 
 export default function Toolbar({
-  connected: _connected,
+  connected: _,
   onOpenPreferences,
   onOpenUpdate,
   onOpenAbout,
   onExportSession,
+  onInstallCa,
   textFilter,
   onTextChange,
 }: ToolbarProps) {
   const handleQuit = async () => {
     try {
       await invoke("stop_proxy");
-    } catch (e) {
-      console.error("Failed to stop proxy on quit:", e);
+    } catch {
+      // ignore
     }
     await getCurrentWindow().close();
   };
 
-  const handleInstallCa = async () => {
-    try {
-      const msg = await invoke<string>("install_ca_certificate");
-      await message(msg, {
-        title: "CA Certificate Installation",
-        kind: "info",
-      });
-    } catch (err) {
-      await message(String(err), {
-        title: "CA Installation Failed",
-        kind: "error",
-      });
-    }
-  };
-
-  const handleMouseDown = (e: React.MouseEvent) => {
+  const handleMouseDown = async (e: React.MouseEvent) => {
     if (
       e.buttons === 1 &&
       (e.target as HTMLElement).hasAttribute("data-tauri-drag-region")
     ) {
-      getCurrentWindow().startDragging();
+      try {
+        await getCurrentWindow().startDragging();
+      } catch {
+        // ignore
+      }
     }
   };
 
@@ -102,7 +92,7 @@ export default function Toolbar({
                 Help
               </MenubarTrigger>
               <MenubarContent>
-                <MenubarItem onClick={handleInstallCa}>
+                <MenubarItem onClick={onInstallCa}>
                   Install CA Certificate...
                 </MenubarItem>
                 <MenubarSeparator />

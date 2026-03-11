@@ -6,6 +6,56 @@
 use crate::proxy::ca::CertificateAuthority;
 use std::path::PathBuf;
 
+/// Returns a list of package names that are missing and needed for full functionality.
+pub fn check_missing_dependencies() -> Vec<String> {
+    #[allow(unused_mut)]
+    let mut missing = Vec::new();
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::process::Command;
+        if Command::new("certutil").arg("-H").output().is_err() {
+            missing.push("libnss3-tools".to_string());
+        }
+    }
+
+    missing
+}
+
+/// Attempt to install a system package by name. Returns Ok on success.
+#[cfg(target_os = "linux")]
+pub fn install_package(package: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    use std::process::Command;
+
+    // Try apt (Debian/Ubuntu), then dnf (Fedora), then pacman (Arch)
+    let managers: &[(&str, &[&str])] = &[
+        ("apt-get", &["install", "-y", package]),
+        ("dnf", &["install", "-y", package]),
+        ("pacman", &["-S", "--noconfirm", package]),
+    ];
+
+    for (mgr, args) in managers {
+        if Command::new("which").arg(mgr).output().map(|o| o.status.success()).unwrap_or(false) {
+            let status = Command::new("pkexec")
+                .arg(mgr)
+                .args(*args)
+                .status()?;
+            if status.success() {
+                return Ok(format!("{} installed successfully", package));
+            } else {
+                return Err(format!("{} install failed (exit code: {})", package, status).into());
+            }
+        }
+    }
+
+    Err("No supported package manager found (apt-get, dnf, or pacman)".into())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn install_package(_package: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    Ok("No packages to install on this platform".to_string())
+}
+
 /// Ensure the CA certificate is trusted by the OS.
 /// Returns a status message.
 pub async fn ensure_ca_trusted() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
@@ -57,8 +107,21 @@ pub async fn check_ca_trusted() -> Result<bool, Box<dyn std::error::Error + Send
 
     #[cfg(target_os = "linux")]
     {
+        use std::fs;
+        use std::path::Path;
+
         let dest = "/usr/local/share/ca-certificates/packetsniffer-ca.crt";
-        return Ok(std::path::Path::new(dest).exists());
+        let dest_path = Path::new(dest);
+
+        // Only report trusted if the destination file exists and matches the current CA cert.
+        if !dest_path.exists() {
+            return Ok(false);
+        }
+
+        let src_bytes = fs::read(&_cert_path)?;
+        let dest_bytes = fs::read(dest_path)?;
+
+        return Ok(src_bytes == dest_bytes);
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
@@ -123,7 +186,8 @@ async fn ensure_trusted_windows(
     }
 }
 
-/// Get the SHA1 thumbprint of a cert file using certutil -hashfile.
+/// Get the SHA1 thumbprint of a cert file using certutil.
+/// Uses `certutil -dump` which reliably shows the cert hash for PEM files.
 #[cfg(target_os = "windows")]
 fn get_cert_file_thumbprint(
     cert_path: &str,
@@ -132,15 +196,20 @@ fn get_cert_file_thumbprint(
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-    // certutil -dump shows the cert hash for PEM files
     let output = Command::new("certutil")
         .args(["-dump", cert_path])
         .creation_flags(CREATE_NO_WINDOW)
         .output()?;
 
+    if !output.status.success() {
+        return Err(format!(
+            "certutil -dump failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ).into());
+    }
+
     let text = String::from_utf8_lossy(&output.stdout);
 
-    // Look for "Cert Hash(sha1): ..." in the dump output
     for line in text.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("Cert Hash(sha1):") {
@@ -148,11 +217,13 @@ fn get_cert_file_thumbprint(
                 .trim_start_matches("Cert Hash(sha1):")
                 .trim()
                 .replace(' ', "");
-            return Ok(hash);
+            if hash.len() == 40 {
+                return Ok(hash);
+            }
         }
     }
 
-    Err("Could not determine cert file thumbprint".into())
+    Err(format!("Could not find SHA1 hash in certutil output for {}", cert_path).into())
 }
 
 /// Get the SHA1 thumbprint of our CA cert in the Local Machine Root store.
@@ -367,6 +438,8 @@ fn install_firefox_policies_json(ca_cert_path: &str) {
 }
 
 /// Write policies.json using elevated permissions (Program Files is admin-protected).
+/// Writes content to a temp file first, then copies via elevated cmd to avoid
+/// escaping issues with nested shell invocations.
 #[cfg(target_os = "windows")]
 fn write_policies_elevated(
     policies_path: &std::path::Path,
@@ -380,16 +453,21 @@ fn write_policies_elevated(
         }
     }
 
-    // Write via elevated cmd — use echo with a temp file approach
-    // (cmd echo doesn't handle multiline well, so use PowerShell Set-Content)
-    let escaped_content = content.replace('"', "\\\"");
-    let ps_cmd = format!(
-        "powershell -Command \"Set-Content -Path '{}' -Value '{}' -Encoding UTF8\"",
-        policies_path.to_string_lossy(),
-        escaped_content.replace('\'', "''")
-    );
+    // Write to a temp file first (no elevation needed), then copy elevated
+    let temp_file = std::env::temp_dir().join("packetsniffer_policies.json");
+    std::fs::write(&temp_file, content)?;
 
-    run_elevated(&ps_cmd)
+    let copy_cmd = format!(
+        "copy /Y \"{}\" \"{}\"",
+        temp_file.to_string_lossy(),
+        policies_path.to_string_lossy()
+    );
+    let result = run_elevated(&copy_cmd);
+
+    // Clean up temp file
+    let _ = std::fs::remove_file(&temp_file);
+
+    result
 }
 
 /// Try to find Firefox installation path from the registry.
@@ -586,25 +664,18 @@ async fn ensure_trusted_linux(
 fn configure_firefox_enterprise_roots_linux(ca_cert_path: &str) {
     use std::process::Command;
 
-    // 1. Install system-wide policy using pkexec
+    // 1. Install system-wide Firefox policy using pkexec.
+    //    Firefox's Certificates.Install policy expects *file paths*, not raw cert data.
     let policy_dirs = [
         "/etc/firefox/policies",
         "/usr/lib/firefox/distribution",
         "/usr/lib/firefox-addons/distribution",
+        // Snap Firefox reads policies from its own prefix
+        "/snap/firefox/current/usr/lib/firefox/distribution",
     ];
 
-    // Read the PEM and convert to pure base64 for Firefox policy (bypasses Snap filesystem restrictions)
-    let cert_content = std::fs::read_to_string(ca_cert_path).unwrap_or_default();
-    let cert_base64 = if cert_content.contains("BEGIN CERTIFICATE") {
-        cert_content
-            .lines()
-            .filter(|l| !l.starts_with("-----"))
-            .collect::<String>()
-    } else {
-        // Fallback to path if reading fails or not a standard PEM
-        ca_cert_path.replace('\\', "\\\\").replace('"', "\\\"")
-    };
-
+    // The Install array takes absolute file paths to PEM certificates.
+    let escaped_path = ca_cert_path.replace('\\', "/");
     let policies_content = format!(
         r#"{{
   "policies": {{
@@ -616,51 +687,58 @@ fn configure_firefox_enterprise_roots_linux(ca_cert_path: &str) {
     }}
   }}
 }}"#,
-        cert_base64
+        escaped_path
     );
 
+    // Use a heredoc so JSON special characters don't break the shell command
     let mut script = String::new();
     for dir in policy_dirs {
         script.push_str(&format!(
-            "mkdir -p '{}' && echo '{}' > '{}/policies.json'; ",
-            dir, policies_content, dir
+            "mkdir -p '{dir}' && cat > '{dir}/policies.json' << 'POLICYEOF'\n{policies_content}\nPOLICYEOF\n",
         ));
     }
 
-    let status = Command::new("pkexec")
-        .args(["bash", "-c", &script])
-        .status();
+        let status = Command::new("pkexec")
+            .args(["bash", "-c", &script])
+            .status();
 
-    if let Ok(s) = status {
-        if s.success() {
-            log::info!("Wrote Firefox policies.json (with base64 cert) to multiple system directories");
-        } else {
-            log::warn!("pkexec failed to write policies.json. Exit status: {}", s);
+    match &status {
+        Ok(s) if s.success() => {
+            log::info!("Wrote Firefox policies.json to system directories");
+        }
+        Ok(s) => {
+            log::warn!("Failed to write policies.json (exit {})", s);
+        }
+        Err(e) => {
+            log::warn!("Failed to run pkexec for policies.json: {}", e);
         }
     }
 
-    // 2. Add cert to all NSS databases (cert9.db) using certutil as a fallback
+    // 2. Add cert directly to all NSS databases (cert9.db) — this is the most
+    //    reliable method and works even when policies.json is ignored (e.g. Snap).
     install_firefox_nss_linux(ca_cert_path);
 
-    // 3. Fallback: Write user.js into all local Firefox profiles
+    // 3. Fallback: Write user.js into all local Firefox profiles so Firefox
+    //    trusts the system CA store via security.enterprise_roots.enabled.
     configure_firefox_profiles_fallback_linux();
 }
 
 /// Fallback for Linux: attempts to install the CA certificate directly into Firefox's
-/// NSS database using `certutil` (from libnss3-tools).
+/// NSS database using `certutil` (from libnss3-tools). This is the most reliable
+/// method for Firefox cert trust — it works across native, Snap, and Flatpak installs.
 #[cfg(target_os = "linux")]
-fn install_firefox_nss_linux(ca_cert_path: &str) {
+fn install_firefox_nss_linux(ca_cert_path: &str) -> bool {
     use std::process::Command;
 
-    // Check if certutil is installed
+    // Check if certutil is installed (from libnss3-tools)
     if Command::new("certutil").arg("-H").output().is_err() {
-        log::warn!("certutil not found. Please install libnss3-tools to automatically trust CA in Firefox via NSS.");
-        return;
+        log::warn!("certutil (libnss3-tools) not found — skipping NSS cert install");
+        return false;
     }
 
     let home = match std::env::var("HOME") {
         Ok(h) => h,
-        Err(_) => return,
+        Err(_) => return false,
     };
 
     let base_dirs = [
@@ -691,16 +769,29 @@ fn install_firefox_nss_linux(ca_cert_path: &str) {
                 continue;
             }
 
-            log::info!("Installing CA directly to NSS database in profile: {}", path.display());
-            
-            // certutil -d sql:/path/to/profile -A -t "C,," -n "PacketSniffer CA" -i /path/to/cert
+            log::info!("Installing CA to NSS database in Firefox profile");
+
+            // Delete any existing cert with the same nickname first to allow re-installs
+            let _ = Command::new("certutil")
+                .args([
+                    "-d",
+                    &format!("sql:{}", path.display()),
+                    "-D",
+                    "-n",
+                    "PacketSniffer Root CA",
+                ])
+                .status();
+
+            // Trust flags: C = trusted CA, T = trusted to issue server certs
+            // "CT,," means: SSL trust = trusted CA that can issue server certs,
+            //               Email trust = none, Object signing trust = none
             let status = Command::new("certutil")
                 .args([
                     "-d",
                     &format!("sql:{}", path.display()),
                     "-A",
                     "-t",
-                    "C,,",
+                    "CT,,",
                     "-n",
                     "PacketSniffer Root CA",
                     "-i",
@@ -717,6 +808,7 @@ fn install_firefox_nss_linux(ca_cert_path: &str) {
             }
         }
     }
+    true
 }
 
 /// Fallback for Linux: sets security.enterprise_roots.enabled in user.js for each Firefox profile.

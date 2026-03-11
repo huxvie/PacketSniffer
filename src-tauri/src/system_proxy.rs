@@ -11,6 +11,13 @@ use std::sync::Mutex;
 /// Saved proxy state so we can restore on exit.
 static ORIGINAL_STATE: Mutex<Option<OriginalProxyState>> = Mutex::new(None);
 
+/// Tracks which UWP loopback exemptions were added by us (not pre-existing),
+/// so `disable_uwp_loopback` only removes what we actually added.
+/// Persisted in the Windows registry at HKCU\Software\PacketSniffer\LoopbackExemptions
+/// to survive app crashes and restarts.
+#[cfg(target_os = "windows")]
+static LOOPBACK_ADDED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
 #[derive(Debug, Clone)]
 struct OriginalProxyState {
     #[cfg(target_os = "windows")]
@@ -215,6 +222,14 @@ fn enable_windows(port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sy
     let winhttp_bypass = "<local>;localhost;127.0.0.1;::1";
     let _ = winhttp_set_proxy(&proxy_addr, winhttp_bypass);
 
+    // Set environment variables for apps that read HTTP_PROXY / HTTPS_PROXY
+    // (e.g. terminal sessions, pip, npm, git, curl, wget, Go apps, Rust apps)
+    set_env_proxy_windows(port);
+
+    // Enable loopback for UWP/AppContainer apps (e.g. Microsoft Store, Mail, etc.)
+    // so they can connect to our localhost proxy
+    enable_uwp_loopback();
+
     log::info!("System proxy set to {}", proxy_addr);
     Ok(())
 }
@@ -251,6 +266,10 @@ fn disable_windows() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     .output();
                 notify_windows_proxy_change();
             }
+            // Remove env vars we set (only those that match our values)
+            clear_env_proxy_windows();
+            // Remove UWP loopback exemptions we added
+            disable_uwp_loopback();
             return Ok(());
         }
     };
@@ -301,6 +320,12 @@ fn disable_windows() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     } else {
         let _ = winhttp_reset();
     }
+
+    // Remove environment variable proxy settings (only those we set)
+    clear_env_proxy_windows();
+
+    // Remove UWP loopback exemptions we added
+    disable_uwp_loopback();
 
     log::info!("System proxy restored to original settings");
     Ok(())
@@ -496,6 +521,364 @@ fn notify_windows_proxy_change() {
 #[cfg(target_os = "windows")]
 pub fn notify_proxy_change() {
     notify_windows_proxy_change();
+}
+
+/// Set HTTP_PROXY / HTTPS_PROXY / NO_PROXY environment variables in the
+/// user registry so that new terminal sessions and CLI tools pick them up.
+/// Broadcasts WM_SETTINGCHANGE so running shells see the update.
+#[cfg(target_os = "windows")]
+fn set_env_proxy_windows(port: u16) {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let env_path = r"HKCU\Environment";
+    let proxy_url = format!("http://127.0.0.1:{}", port);
+    let no_proxy = "localhost,127.0.0.1,::1";
+
+    for (name, value) in [
+        ("HTTP_PROXY", proxy_url.as_str()),
+        ("HTTPS_PROXY", proxy_url.as_str()),
+        ("http_proxy", proxy_url.as_str()),
+        ("https_proxy", proxy_url.as_str()),
+        ("NO_PROXY", no_proxy),
+        ("no_proxy", no_proxy),
+    ] {
+        let _ = Command::new("reg")
+            .args([
+                "add", env_path, "/v", name, "/t", "REG_SZ", "/d", value, "/f",
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+    }
+
+    broadcast_setting_change_windows();
+    log::info!(
+        "Set HTTP_PROXY/HTTPS_PROXY environment variables (port {})",
+        port
+    );
+}
+
+/// Remove the proxy environment variables we set, but only if they still hold
+/// a value that is exactly `http://127.0.0.1:<port>` (pure loopback proxy URL
+/// with no extra path or query). This preserves any proxy configuration the
+/// user had before PacketSniffer ran, while still covering all port numbers we
+/// may have been configured with.
+#[cfg(target_os = "windows")]
+fn clear_env_proxy_windows() {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    /// Returns true iff `val` is exactly `http://127.0.0.1:<port>` where
+    /// `<port>` is a valid u16 with no trailing characters.
+    fn is_our_proxy_url(val: &str) -> bool {
+        if let Some(port_str) = val.strip_prefix("http://127.0.0.1:") {
+            port_str.parse::<u16>().is_ok()
+        } else {
+            false
+        }
+    }
+
+    let env_path = r"HKCU\Environment";
+    let our_no_proxy = "localhost,127.0.0.1,::1";
+
+    // Only delete HTTP(S)_PROXY if it is exactly the loopback URL we wrote
+    for name in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+        if let Some(val) = reg_query_string(env_path, name) {
+            if is_our_proxy_url(&val) {
+                let _ = Command::new("reg")
+                    .args(["delete", env_path, "/v", name, "/f"])
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .output();
+            }
+        }
+    }
+
+    // Only delete NO_PROXY if it matches exactly what we set
+    for name in ["NO_PROXY", "no_proxy"] {
+        if reg_query_string(env_path, name).as_deref() == Some(our_no_proxy) {
+            let _ = Command::new("reg")
+                .args(["delete", env_path, "/v", name, "/f"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output();
+        }
+    }
+
+    broadcast_setting_change_windows();
+    log::info!("Cleared HTTP_PROXY/HTTPS_PROXY environment variables");
+}
+
+/// Broadcast WM_SETTINGCHANGE so running Explorer / shells pick up env changes.
+#[cfg(target_os = "windows")]
+fn broadcast_setting_change_windows() {
+    unsafe {
+        #[link(name = "user32")]
+        extern "system" {
+            fn SendMessageTimeoutW(
+                hwnd: *mut std::ffi::c_void,
+                msg: u32,
+                wparam: usize,
+                lparam: *const u16,
+                flags: u32,
+                timeout: u32,
+                result: *mut usize,
+            ) -> isize;
+        }
+        // HWND_BROADCAST = 0xFFFF, WM_SETTINGCHANGE = 0x001A, SMTO_ABORTIFHUNG = 0x0002
+        let env: Vec<u16> = "Environment\0".encode_utf16().collect();
+        let mut _result: usize = 0;
+        SendMessageTimeoutW(
+            0xFFFF as *mut _,
+            0x001A,
+            0,
+            env.as_ptr(),
+            0x0002,
+            5000,
+            &mut _result,
+        );
+    }
+}
+
+/// Save the list of loopback exemptions we added to the Windows registry
+/// so they persist across app crashes and restarts.
+#[cfg(target_os = "windows")]
+fn save_loopback_exemptions(packages: &[String]) {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let reg_path = r"HKCU\Software\PacketSniffer";
+
+    // Create the key if it doesn't exist
+    let _ = Command::new("reg")
+        .args(["add", reg_path, "/f"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+
+    // Store the list as a comma-separated string
+    let value = packages.join(",");
+    let _ = Command::new("reg")
+        .args([
+            "add",
+            reg_path,
+            "/v",
+            "LoopbackExemptions",
+            "/t",
+            "REG_SZ",
+            "/d",
+            &value,
+            "/f",
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+
+    log::debug!("Saved loopback exemptions to registry: {}", value);
+}
+
+/// Load the list of loopback exemptions we previously added from the Windows registry.
+#[cfg(target_os = "windows")]
+fn load_loopback_exemptions() -> Vec<String> {
+    let reg_path = r"HKCU\Software\PacketSniffer";
+    match reg_query_string(reg_path, "LoopbackExemptions") {
+        Some(value) if !value.is_empty() => {
+            let packages: Vec<String> = value.split(',').map(|s| s.to_string()).collect();
+            log::debug!("Loaded loopback exemptions from registry: {:?}", packages);
+            packages
+        }
+        _ => {
+            log::debug!("No loopback exemptions found in registry");
+            Vec::new()
+        }
+    }
+}
+
+/// Clear the saved loopback exemptions from the Windows registry.
+#[cfg(target_os = "windows")]
+fn clear_loopback_exemptions() {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let reg_path = r"HKCU\Software\PacketSniffer";
+    let _ = Command::new("reg")
+        .args(["delete", reg_path, "/v", "LoopbackExemptions", "/f"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+
+    log::debug!("Cleared loopback exemptions from registry");
+}
+
+/// Query which UWP / AppContainer packages currently have loopback exemptions
+/// by running `CheckNetIsolation LoopbackExempt -s` and parsing its output.
+/// Returns package names as-is (preserving case from the OS output).
+///
+/// Output format per line: `[N] - PackageName, SID = S-1-15-2-...`
+#[cfg(target_os = "windows")]
+fn query_loopback_exemptions() -> Vec<String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    match Command::new("CheckNetIsolation")
+        .args(["LoopbackExempt", "-s"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    {
+        Ok(out) => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let mut names = Vec::new();
+            for line in text.lines() {
+                // Expected format: "[N] - PackageName, SID = ..."  or  "[N] - PackageName"
+                if let Some(after_dash) = line.split(" - ").nth(1) {
+                    let name = after_dash
+                        .split(',')
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    if !name.is_empty() {
+                        names.push(name);
+                    } else {
+                        log::debug!(
+                            "CheckNetIsolation -s: could not parse name from line: {:?}",
+                            line
+                        );
+                    }
+                }
+                // Lines without " - " (e.g. the header) are silently skipped
+            }
+            names
+        }
+        Err(e) => {
+            log::debug!("CheckNetIsolation LoopbackExempt -s failed: {}", e);
+            Vec::new()
+        }
+    }
+}
+
+/// Enable loopback for UWP / AppContainer apps so they can connect to our
+/// localhost proxy. Uses `CheckNetIsolation` which is available on Win 8+.
+/// Microsoft Store, Mail, and other UWP apps run in AppContainers that block
+/// loopback by default, preventing them from reaching 127.0.0.1.
+///
+/// Snapshots pre-existing exemptions first so that `disable_uwp_loopback` can
+/// remove only the entries we added (preserving any the user had beforehand).
+/// State is persisted to the Windows registry to survive app crashes.
+#[cfg(target_os = "windows")]
+fn enable_uwp_loopback() {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    // Well-known package family names for common UWP apps
+    let uwp_packages = [
+        "Microsoft.WindowsStore_8wekyb3d8bbwe",
+        "microsoft.windowscommunicationsapps_8wekyb3d8bbwe",
+        "Microsoft.MicrosoftEdge_8wekyb3d8bbwe",
+        "Microsoft.Windows.Search_cw5n1h2txyewy",
+        "Microsoft.AAD.BrokerPlugin_cw5n1h2txyewy",
+        "Microsoft.Windows.ContentDeliveryManager_cw5n1h2txyewy",
+        "Microsoft.StorePurchaseApp_8wekyb3d8bbwe",
+    ];
+
+    // Snapshot which packages are already exempt so we skip those and don't
+    // remove them when the proxy is disabled later.
+    let already_exempt = query_loopback_exemptions();
+    let persisted = load_loopback_exemptions();
+    let mut added: Vec<String> = Vec::new();
+
+    for pkg in &persisted {
+        if already_exempt.iter().any(|e| e.eq_ignore_ascii_case(pkg)) {
+            log::debug!("Re-claiming persisted loopback exemption for {}", pkg);
+            added.push(pkg.clone());
+        }
+    }
+
+    for pkg in &uwp_packages {
+        if already_exempt.iter().any(|e| e.eq_ignore_ascii_case(pkg)) {
+            log::debug!("Loopback exemption already present for {}", pkg);
+            continue;
+        }
+
+        let result = Command::new("CheckNetIsolation")
+            .args(["LoopbackExempt", "-a", &format!("-n={}", pkg)])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+        match result {
+            Ok(o) if o.status.success() => {
+                log::debug!("Loopback exemption added for {}", pkg);
+                added.push(pkg.to_string());
+            }
+            Ok(o) => {
+                log::debug!(
+                    "Loopback exemption skipped for {}: {}",
+                    pkg,
+                    String::from_utf8_lossy(&o.stderr)
+                );
+            }
+            Err(e) => {
+                log::debug!("CheckNetIsolation failed for {}: {}", pkg, e);
+            }
+        }
+    }
+
+    // Update both in-memory state and persistent storage
+    *LOOPBACK_ADDED.lock().unwrap() = added.clone();
+    save_loopback_exemptions(&added);
+}
+
+/// Remove only the loopback exemptions that `enable_uwp_loopback` actually
+/// added (i.e. those that were not already present before we started). This
+/// avoids clobbering pre-existing user exemptions for the same packages.
+/// Reads from both in-memory state and persistent registry storage to handle
+/// cleanup after app crashes.
+#[cfg(target_os = "windows")]
+fn disable_uwp_loopback() {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    // Load both in-memory state and persisted state (in case the app crashed before)
+    let mut added = std::mem::take(&mut *LOOPBACK_ADDED.lock().unwrap());
+    let persisted = load_loopback_exemptions();
+
+    // Merge the two lists, preferring the persisted state if in-memory is empty
+    if added.is_empty() && !persisted.is_empty() {
+        log::debug!("Using persisted loopback exemptions (app may have crashed previously)");
+        added = persisted;
+    }
+
+    if added.is_empty() {
+        log::debug!("No loopback exemptions to remove");
+        clear_loopback_exemptions();
+        return;
+    }
+
+    for pkg in &added {
+        let result = Command::new("CheckNetIsolation")
+            .args(["LoopbackExempt", "-d", &format!("-n={}", pkg)])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+        match result {
+            Ok(o) if o.status.success() => {
+                log::debug!("Loopback exemption removed for {}", pkg);
+            }
+            Ok(o) => {
+                log::debug!(
+                    "Loopback exemption removal skipped for {}: {}",
+                    pkg,
+                    String::from_utf8_lossy(&o.stderr)
+                );
+            }
+            Err(e) => {
+                log::debug!("CheckNetIsolation failed for {}: {}", pkg, e);
+            }
+        }
+    }
+
+    // Clear the persistent storage after successful cleanup
+    clear_loopback_exemptions();
 }
 
 // ─── macOS ────────────────────────────────────────────────────────────────────
@@ -748,6 +1131,11 @@ fn enable_linux(port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync
         ])
         .status();
 
+    // Set environment variables so terminal apps (curl, wget, pip, npm, git, etc.)
+    // route through our proxy. Write a drop-in file in /etc/profile.d/ and
+    // /etc/environment.d/ so all new shells and services pick them up.
+    set_env_proxy_linux(port);
+
     log::info!("System proxy set to 127.0.0.1:{}", port);
     Ok(())
 }
@@ -808,6 +1196,9 @@ fn disable_linux() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     }
 
+    // Remove proxy environment variable drop-in files
+    clear_env_proxy_linux();
+
     log::info!("System proxy restored to original settings");
     Ok(())
 }
@@ -847,4 +1238,89 @@ fn gsettings_get(schema: &str, key: &str) -> String {
                 .to_string()
         })
         .unwrap_or_default()
+}
+
+/// Write a drop-in shell script that exports proxy env vars for all new shells,
+/// and an environment.d config for systemd user services.
+#[cfg(target_os = "linux")]
+fn set_env_proxy_linux(port: u16) {
+    use std::process::Command;
+
+    let proxy_url = format!("http://127.0.0.1:{}", port);
+    let no_proxy = "localhost,127.0.0.1,::1";
+
+    // 1. /etc/profile.d/packetsniffer-proxy.sh — sourced by login shells (bash, zsh, etc.)
+    let profile_script = format!(
+        r#"# Managed by PacketSniffer — do not edit
+export http_proxy="{proxy_url}"
+export https_proxy="{proxy_url}"
+export HTTP_PROXY="{proxy_url}"
+export HTTPS_PROXY="{proxy_url}"
+export no_proxy="{no_proxy}"
+export NO_PROXY="{no_proxy}"
+"#
+    );
+
+    // 2. /etc/environment.d/packetsniffer-proxy.conf — read by systemd and PAM
+    let env_conf = format!(
+        r#"# Managed by PacketSniffer — do not edit
+http_proxy={proxy_url}
+https_proxy={proxy_url}
+HTTP_PROXY={proxy_url}
+HTTPS_PROXY={proxy_url}
+no_proxy={no_proxy}
+NO_PROXY={no_proxy}
+"#
+    );
+
+    let script = format!(
+        r#"cat > /etc/profile.d/packetsniffer-proxy.sh << 'EOF'
+{profile_script}EOF
+chmod 644 /etc/profile.d/packetsniffer-proxy.sh
+mkdir -p /etc/environment.d
+cat > /etc/environment.d/packetsniffer-proxy.conf << 'EOF'
+{env_conf}EOF
+chmod 644 /etc/environment.d/packetsniffer-proxy.conf"#
+    );
+
+    let status = Command::new("pkexec")
+        .args(["bash", "-c", &script])
+        .status();
+
+    match &status {
+        Ok(s) if s.success() => {
+            log::info!(
+                "Set proxy environment variables via profile.d + environment.d (port {})",
+                port
+            );
+        }
+        Ok(s) => {
+            log::warn!("pkexec failed to set env proxy files. Exit status: {}", s);
+        }
+        Err(e) => {
+            log::warn!("Failed to run pkexec for env proxy: {}", e);
+        }
+    }
+}
+
+/// Remove the drop-in proxy configuration files.
+#[cfg(target_os = "linux")]
+fn clear_env_proxy_linux() {
+    use std::process::Command;
+
+    let script =
+        "rm -f /etc/profile.d/packetsniffer-proxy.sh /etc/environment.d/packetsniffer-proxy.conf";
+    let status = Command::new("pkexec").args(["bash", "-c", script]).status();
+
+    match &status {
+        Ok(s) if s.success() => {
+            log::info!("Cleared proxy environment variable files");
+        }
+        Ok(s) => {
+            log::warn!("pkexec failed to clear env proxy files. Exit status: {}", s);
+        }
+        Err(e) => {
+            log::warn!("Failed to run pkexec for env proxy cleanup: {}", e);
+        }
+    }
 }

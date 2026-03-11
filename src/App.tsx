@@ -1,5 +1,5 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from "react";
-import { save, confirm, message } from "@tauri-apps/plugin-dialog";
+import { save } from "@tauri-apps/plugin-dialog";
 import { writeTextFile } from "@tauri-apps/plugin-fs";
 import { invoke } from "@tauri-apps/api/core";
 import { useProxySessions, useWsMessages } from "./hooks/useTauriEvents";
@@ -20,7 +20,8 @@ import StatusBar from "./components/StatusBar";
 import PreferencesDialog from "./components/PreferencesDialog";
 import AboutDialog from "./components/AboutDialog";
 import UpdateDialog from "./components/UpdateDialog";
-import Spinner from "./components/Spinner";
+import CaInstallDialog from "./components/CaInstallDialog";
+import DependencyDialog from "./components/DependencyDialog";
 import type { HttpSession } from "./types";
 
 function matchesContentFilter(s: HttpSession, filter: ContentFilter): boolean {
@@ -87,10 +88,17 @@ export default function App() {
 
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [textFilter, setTextFilter] = useState("");
+  const [debouncedFilter, setDebouncedFilter] = useState("");
   const [contentFilter, setContentFilter] = useState<ContentFilter>("All");
   const [selectedDomain, setSelectedDomain] = useState<string | null>(null);
   const [showPinnedOnly, setShowPinnedOnly] = useState(false);
   const [pinnedIds, setPinnedIds] = useState<Set<number>>(new Set());
+
+  // Debounce text filter to avoid re-filtering on every keystroke
+  useEffect(() => {
+    const id = setTimeout(() => setDebouncedFilter(textFilter), 150);
+    return () => clearTimeout(id);
+  }, [textFilter]);
 
   const handleTogglePin = useCallback((id: number) => {
     setPinnedIds((prev) => {
@@ -105,7 +113,9 @@ export default function App() {
   const [aboutOpen, setAboutOpen] = useState(false);
   const [updateOpen, setUpdateOpen] = useState(false);
   const [proxyPort, setProxyPort] = useState(8080);
-  const [isInstallingCa, setIsInstallingCa] = useState(false);
+  const [showCaDialog, setShowCaDialog] = useState(false);
+  const [showDepDialog, setShowDepDialog] = useState(false);
+  const [missingDeps, setMissingDeps] = useState<string[]>([]);
 
   useEffect(() => {
     invoke<string>("get_proxy_status")
@@ -115,40 +125,30 @@ export default function App() {
           setProxyPort(parseInt(match[1], 10));
         }
       })
-      .catch(console.error);
+      .catch(() => {});
   }, []);
 
+  // Check for missing system dependencies
   useEffect(() => {
-    // Check if CA certificate is trusted by the OS
-    invoke<boolean>("check_ca_trusted")
-      .then(async (isTrusted) => {
-        if (!isTrusted) {
-          const install = await confirm(
-            "The PacketSniffer CA Certificate is not trusted by your system. " +
-              "HTTPS interception will not work without it.\n\n" +
-              "Would you like to install it now? (Requires Administrator/Root privileges)",
-            { title: "Install CA Certificate", kind: "info" }
-          );
-
-          if (install) {
-            setIsInstallingCa(true);
-            try {
-              const result = await invoke<string>("install_ca_certificate");
-              setIsInstallingCa(false);
-              await message(result, { title: "Success", kind: "info" });
-            } catch (err: any) {
-              setIsInstallingCa(false);
-              await message(`Failed to install CA certificate:\n${err}`, {
-                title: "Error",
-                kind: "error",
-              });
-            }
-          }
+    invoke<string[]>("check_missing_deps")
+      .then((deps) => {
+        if (deps.length > 0) {
+          setMissingDeps(deps);
+          setShowDepDialog(true);
         }
       })
-      .catch((err) => {
-        console.error("Failed to check CA trust status:", err);
-      });
+      .catch(() => {});
+  }, []);
+
+  // Check if CA certificate is trusted — show in-app dialog instead of system one
+  useEffect(() => {
+    invoke<boolean>("check_ca_trusted")
+      .then((isTrusted) => {
+        if (!isTrusted) {
+          setShowCaDialog(true);
+        }
+      })
+      .catch(() => {});
   }, []);
 
   const handleExportSession = useCallback(async () => {
@@ -191,7 +191,7 @@ export default function App() {
   }, [clearSessions, clearWsMessages]);
 
   const filteredOrder = useMemo(() => {
-    const needle = textFilter.toLowerCase();
+    const needle = debouncedFilter.toLowerCase();
 
     return order.filter((id) => {
       if (showPinnedOnly && !pinnedIds.has(id)) return false;
@@ -214,7 +214,7 @@ export default function App() {
   }, [
     order,
     sessions,
-    textFilter,
+    debouncedFilter,
     contentFilter,
     selectedDomain,
     showPinnedOnly,
@@ -252,6 +252,7 @@ export default function App() {
           onOpenUpdate={() => setUpdateOpen(true)}
           onOpenAbout={() => setAboutOpen(true)}
           onExportSession={handleExportSession}
+          onInstallCa={() => setShowCaDialog(true)}
           textFilter={textFilter}
           onTextChange={setTextFilter}
         />
@@ -348,17 +349,17 @@ export default function App() {
 
         <UpdateDialog open={updateOpen} onOpenChange={setUpdateOpen} />
 
-        {isInstallingCa && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-            <div className="flex flex-col items-center gap-4 p-6 bg-bg-1 border border-border rounded-lg shadow-lg">
-              <Spinner size={32} />
-              <p className="text-text-0 font-medium">Installing CA Certificate...</p>
-              <p className="text-text-1 text-sm text-center max-w-xs">
-                Please follow the system prompts to complete the installation.
-              </p>
-            </div>
-          </div>
-        )}
+        <CaInstallDialog
+          open={showCaDialog}
+          onOpenChange={setShowCaDialog}
+        />
+
+        <DependencyDialog
+          open={showDepDialog}
+          onOpenChange={setShowDepDialog}
+          missingDeps={missingDeps}
+        />
+
       </div>
     </main>
   );

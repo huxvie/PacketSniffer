@@ -172,6 +172,29 @@ async fn check_ca_trusted() -> Result<bool, String> {
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn check_missing_deps() -> Vec<String> {
+    cert_store::check_missing_dependencies()
+}
+
+#[tauri::command]
+async fn install_dependency(package: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        // Only allow packages that the dependency checker itself identified as missing,
+        // preventing arbitrary root-level package installation from the frontend.
+        let allowed = cert_store::check_missing_dependencies();
+        if !allowed.contains(&package) {
+            return Err(format!(
+                "Package '{}' is not in the allowed install list",
+                package
+            ));
+        }
+        cert_store::install_package(&package).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("Failed to execute package installation task: {e}"))?
+}
+
 // ─── App Entry ───────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -215,6 +238,8 @@ pub fn run() {
             set_proxy_port,
             install_ca_certificate,
             check_ca_trusted,
+            check_missing_deps,
+            install_dependency,
             open_in_postman,
         ])
         .setup(|app| {
@@ -224,6 +249,23 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 let state = handle.state::<ProxyState>();
                 let mut engine_guard = state.engine.lock().await;
+
+                // Check (non-privileged) whether the CA is already trusted.
+                // Actual installation is driven by the UI after user consent
+                // to avoid unexpected UAC/pkexec prompts at startup.
+                match cert_store::check_ca_trusted().await {
+                    Ok(true) => {
+                        log::info!("CA certificate is trusted");
+                    }
+                    Ok(false) => {
+                        log::warn!(
+                            "CA certificate is not trusted — the app will prompt for installation"
+                        );
+                    }
+                    Err(e) => {
+                        log::warn!("Could not check CA trust status: {}", e);
+                    }
+                }
 
                 let app_handle = handle.clone();
                 let app_handle_ws = handle.clone();
@@ -252,18 +294,6 @@ pub fn run() {
                             }
                             Err(e) => {
                                 log::error!("Failed to set system proxy: {}", e);
-                            }
-                        }
-
-                        match cert_store::ensure_ca_trusted().await {
-                            Ok(msg) => {
-                                log::info!("CA trust store: {}", msg);
-                            }
-                            Err(e) => {
-                                log::warn!(
-                                    "CA cert not trusted — HTTPS interception will fail: {}",
-                                    e
-                                );
                             }
                         }
                     }
@@ -388,6 +418,21 @@ fn cleanup_stale_proxy() {
 
             system_proxy::notify_proxy_change();
             log::info!("Cleaned up stale proxy from previous session");
+        }
+
+        // Also clean up stale environment variable proxy settings from a previous crash
+        let env_path = r"HKCU\Environment";
+        let proxy_keys = ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy"];
+        let has_stale_proxy = proxy_keys.iter().any(|key| {
+            system_proxy::reg_query_string(env_path, key)
+                .map(|v| v.starts_with("http://127.0.0.1:"))
+                .unwrap_or(false)
+        });
+
+        if has_stale_proxy {
+            log::warn!("Detected stale proxy environment variables — clearing");
+            // Delegate to disable which clears env vars
+            let _ = system_proxy::disable();
         }
     }
 }

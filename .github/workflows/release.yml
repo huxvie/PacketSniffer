@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       bump:
-        description: 'Version bump type'
+        description: "Version bump type"
         required: true
-        default: 'patch'
+        default: "patch"
         type: choice
         options:
           - patch
@@ -27,9 +27,9 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: "20"
 
       - name: install bun
         uses: oven-sh/setup-bun@v2
@@ -44,32 +44,32 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
+
           # 1. Bump package.json (this also updates the version without tagging)
           npm version ${{ github.event.inputs.bump }} --no-git-tag-version
           NEW_VERSION=$(node -p "require('./package.json').version")
-          
+
           # 2. Bump tauri.conf.json
           tmp=$(mktemp)
           jq ".version = \"$NEW_VERSION\"" src-tauri/tauri.conf.json > "$tmp"
           mv "$tmp" src-tauri/tauri.conf.json
-          
+
           # 3. Bump Cargo.toml
           sed -i "0,/^version = \".*\"/s/^version = \".*\"/version = \"$NEW_VERSION\"/" src-tauri/Cargo.toml
-          
+
           # 4. Update lockfiles
           bun install
           cd src-tauri && cargo check && cd ..
-          
+
           # 5. Commit and tag
           git add package.json bun.lock src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
           git commit -m "chore: release v$NEW_VERSION"
           git tag "v$NEW_VERSION"
-          
+
           # 6. Push commit and tag
           git push origin HEAD
           git push origin "v$NEW_VERSION"
-          
+
           # Export the tag for the next job
           echo "version=v$NEW_VERSION" >> $GITHUB_OUTPUT
 
@@ -140,19 +140,19 @@ jobs:
       # Remove signature files from the release
       - name: Remove signature files from release
         if: success()
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const tag = '${{ needs.prepare-release.outputs.tag_name }}';
-            
+
             const release = await github.rest.repos.getReleaseByTag({
               owner,
               repo,
               tag
             });
-            
+
             for (const asset of release.data.assets) {
               if (asset.name.endsWith('.pub') || asset.name.endsWith('.sig')) {
                 console.log(`Deleting ${asset.name}...`);

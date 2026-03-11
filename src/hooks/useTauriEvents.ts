@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
@@ -8,29 +8,60 @@ import type {
   WsMessageEvent,
 } from "../types";
 
-/* Returns the session map, ordered IDs, connection status, and a clear function. */
+/* ─── Batched proxy session hook ─────────────────────────────────────────────
+ * Collects all proxy-session events that arrive within a single animation
+ * frame and flushes them as one React state update, dramatically reducing
+ * re-renders under heavy traffic (e.g. page loads with 100+ sub-requests).
+ */
 export function useProxySessions() {
   const [sessions, setSessions] = useState<Map<number, HttpSession>>(new Map());
   const [order, setOrder] = useState<number[]>([]);
   const [connected, setConnected] = useState(false);
 
+  // Accumulate events between frames
+  const pendingUpdates = useRef<HttpSession[]>([]);
+  const pendingStarts = useRef<number[]>([]);
+  const rafId = useRef<number | null>(null);
+
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
     let cancelled = false;
 
-    listen<SessionEvent>("proxy-session", (event) => {
-      if (cancelled) return;
-      const { type, session } = event.payload;
-      // works for any event
-      setConnected(true);
+    const flush = () => {
+      rafId.current = null;
+      const updates = pendingUpdates.current;
+      const starts = pendingStarts.current;
+      pendingUpdates.current = [];
+      pendingStarts.current = [];
+
+      if (updates.length === 0) return;
 
       setSessions((prev) => {
         const next = new Map(prev);
-        next.set(session.id, session);
+        for (const session of updates) {
+          next.set(session.id, session);
+        }
         return next;
       });
+
+      if (starts.length > 0) {
+        setOrder((prev) => [...prev, ...starts]);
+      }
+    };
+
+    listen<SessionEvent>("proxy-session", (event) => {
+      if (cancelled) return;
+      const { type, session } = event.payload;
+      setConnected(true);
+
+      pendingUpdates.current.push(session);
       if (type === "start") {
-        setOrder((prev) => [...prev, session.id]);
+        pendingStarts.current.push(session.id);
+      }
+
+      // Schedule a flush on the next animation frame (coalesces all events in this frame)
+      if (rafId.current === null) {
+        rafId.current = requestAnimationFrame(flush);
       }
     }).then((fn) => {
       if (cancelled) {
@@ -60,6 +91,9 @@ export function useProxySessions() {
     return () => {
       cancelled = true;
       unlisten?.();
+      if (rafId.current !== null) {
+        cancelAnimationFrame(rafId.current);
+      }
     };
   }, []);
 
@@ -74,19 +108,43 @@ export function useProxySessions() {
 export function useWsMessages() {
   const [messages, setMessages] = useState<Map<number, WsMessage[]>>(new Map());
 
+  const pendingMessages = useRef<WsMessage[]>([]);
+  const rafId = useRef<number | null>(null);
+
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
     let cancelled = false;
 
-    listen<WsMessageEvent>("ws-message", (event) => {
-      if (cancelled) return;
-      const msg = event.payload.message;
+    const flush = () => {
+      rafId.current = null;
+      const batch = pendingMessages.current;
+      pendingMessages.current = [];
+
+      if (batch.length === 0) return;
+
       setMessages((prev) => {
         const next = new Map(prev);
-        const list = next.get(msg.sessionId) ?? [];
-        next.set(msg.sessionId, [...list, msg]);
+        const grouped = new Map<number, typeof batch>();
+        for (const msg of batch) {
+          const arr = grouped.get(msg.sessionId) ?? [];
+          arr.push(msg);
+          grouped.set(msg.sessionId, arr);
+        }
+        for (const [sessionId, msgs] of grouped) {
+          const existing = next.get(sessionId) ?? [];
+          next.set(sessionId, existing.concat(msgs));
+        }
         return next;
       });
+    };
+
+    listen<WsMessageEvent>("ws-message", (event) => {
+      if (cancelled) return;
+      pendingMessages.current.push(event.payload.message);
+
+      if (rafId.current === null) {
+        rafId.current = requestAnimationFrame(flush);
+      }
     }).then((fn) => {
       if (cancelled) {
         fn();
@@ -98,6 +156,9 @@ export function useWsMessages() {
     return () => {
       cancelled = true;
       unlisten?.();
+      if (rafId.current !== null) {
+        cancelAnimationFrame(rafId.current);
+      }
     };
   }, []);
 

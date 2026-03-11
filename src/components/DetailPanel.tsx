@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { cn } from "@/lib/utils";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
@@ -99,6 +99,67 @@ export default function DetailPanel({ session, wsMessages }: DetailPanelProps) {
   const [reqTab, setReqTab] = useState<RequestTab>("Header");
   const [resTab, setResTab] = useState<ResponseTab>("Header");
 
+  // Track the user's preferred tabs so we can restore them when switching requests
+  const preferredReqTab = useRef<RequestTab>("Header");
+  const preferredResTab = useRef<ResponseTab>("Header");
+  const prevSessionId = useRef<number | null>(null);
+
+  // Smart tab switching: when the selected session changes, pick the best tab
+  useEffect(() => {
+    if (!session) return;
+    if (session.id === prevSessionId.current) return;
+    prevSessionId.current = session.id;
+
+    const isWs = session.scheme === "ws" || session.scheme === "wss";
+    const hasReqBody = !!session.requestBody;
+    const hasResBody = !!session.responseBody;
+    const queryParams = parseQueryParams(session.path);
+    const hasQuery = queryParams.length > 0;
+    const hasReqCookies = session.requestHeaders.some(
+      (h) => h.name.toLowerCase() === "cookie",
+    );
+    const hasResCookies = session.responseHeaders.some(
+      (h) => h.name.toLowerCase() === "set-cookie",
+    );
+
+    // Request tab: try to keep the user's preferred tab, fall back to Header
+    const reqAvailable: RequestTab[] = ["Header"];
+    if (hasQuery) reqAvailable.push("Query");
+    if (hasReqBody) reqAvailable.push("Body");
+    if (hasReqCookies) reqAvailable.push("Cookies");
+
+    if (reqAvailable.includes(preferredReqTab.current)) {
+      setReqTab(preferredReqTab.current);
+    } else {
+      setReqTab("Header");
+    }
+
+    // Response tab: try preferred, handle WS specially
+    const resAvailable: ResponseTab[] = ["Header"];
+    if (hasResBody) resAvailable.push("Body");
+    if (hasResCookies) resAvailable.push("Cookies");
+    if (isWs) resAvailable.push("Messages");
+
+    if (resAvailable.includes(preferredResTab.current)) {
+      setResTab(preferredResTab.current);
+    } else if (isWs) {
+      setResTab("Messages");
+    } else {
+      setResTab("Header");
+    }
+  }, [session]);
+
+  // Update preferred tab whenever the user explicitly clicks a tab
+  const handleReqTab = (tab: RequestTab) => {
+    preferredReqTab.current = tab;
+    setReqTab(tab);
+  };
+
+  const handleResTab = (tab: ResponseTab) => {
+    preferredResTab.current = tab;
+    setResTab(tab);
+  };
+
   if (!session) {
     return (
       <div className="h-full flex items-center justify-center bg-background text-muted-foreground text-xs">
@@ -192,27 +253,27 @@ export default function DetailPanel({ session, wsMessages }: DetailPanelProps) {
             <TabButton
               label="Header"
               active={reqTab === "Header"}
-              onClick={() => setReqTab("Header")}
+              onClick={() => handleReqTab("Header")}
             />
             {hasQuery && (
               <TabButton
                 label="Query"
                 active={reqTab === "Query"}
-                onClick={() => setReqTab("Query")}
+                onClick={() => handleReqTab("Query")}
               />
             )}
             {hasReqBody && (
               <TabButton
                 label="Body"
                 active={reqTab === "Body"}
-                onClick={() => setReqTab("Body")}
+                onClick={() => handleReqTab("Body")}
               />
             )}
             {hasReqCookies && (
               <TabButton
                 label="Cookies"
                 active={reqTab === "Cookies"}
-                onClick={() => setReqTab("Cookies")}
+                onClick={() => handleReqTab("Cookies")}
               />
             )}
 
@@ -319,27 +380,27 @@ export default function DetailPanel({ session, wsMessages }: DetailPanelProps) {
             <TabButton
               label="Header"
               active={resTab === "Header"}
-              onClick={() => setResTab("Header")}
+              onClick={() => handleResTab("Header")}
             />
             {hasResBody && (
               <TabButton
                 label="Body"
                 active={resTab === "Body"}
-                onClick={() => setResTab("Body")}
+                onClick={() => handleResTab("Body")}
               />
             )}
             {hasResCookies && (
               <TabButton
                 label="Cookies"
                 active={resTab === "Cookies"}
-                onClick={() => setResTab("Cookies")}
+                onClick={() => handleResTab("Cookies")}
               />
             )}
             {isWs && (
               <TabButton
                 label="Messages"
                 active={resTab === "Messages"}
-                onClick={() => setResTab("Messages")}
+                onClick={() => handleResTab("Messages")}
               />
             )}
 

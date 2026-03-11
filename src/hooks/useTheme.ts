@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 
 export type Theme = "light" | "dark" | "system";
 
@@ -60,20 +60,11 @@ export function useTheme() {
     return () => mediaQuery.removeEventListener("change", handleChange);
   }, [theme]);
 
-  const setTheme = useCallback((t: Theme) => {
+  const setTheme = (t: Theme) => {
     setThemeState(t);
-  }, []);
-
-  const toggleTheme = useCallback(() => {
-    // For a toggle, cycle through them or just switch light/dark
-    setThemeState((prev) => {
-      if (prev === "system") return "light";
-      if (prev === "light") return "dark";
-      return "system";
-    });
-  }, []);
+  };
 
   const isDark = theme === "dark" || (theme === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
 
-  return { theme, setTheme, toggleTheme, isDark } as const;
+  return { theme, setTheme, isDark } as const;
 }

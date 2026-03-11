@@ -14,6 +14,26 @@ export default defineConfig({
   },
   clearScreen: false, // tauri logs remain visible
 
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          codemirror: [
+            "@uiw/react-codemirror",
+            "@codemirror/lang-json",
+            "@codemirror/lang-html",
+            "@codemirror/lang-xml",
+            "@codemirror/lang-javascript",
+            "@codemirror/language",
+            "@codemirror/view",
+            "@lezer/highlight",
+          ],
+        },
+      },
+    },
+    chunkSizeWarningLimit: 600,
+  },
+
   server: {
     port: 5173,
     strictPort: true,
