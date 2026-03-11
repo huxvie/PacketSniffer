@@ -2530,7 +2530,7 @@ dependencies = [
 
 [[package]]
 name = "packetsniffer"
-version = "0.0.5"
+version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "brotli",
