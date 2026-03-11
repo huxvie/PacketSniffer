@@ -134,6 +134,9 @@ async fn set_proxy_port(
 
 #[tauri::command]
 async fn install_ca_certificate() -> Result<String, String> {
+    // Regenerate the CA with current (fixed) parameters before installing,
+    // in case the old cert was generated without KeyEncipherment or proper validity.
+    let _ = proxy::ca::CertificateAuthority::regenerate(None);
     cert_store::ensure_ca_trusted()
         .await
         .map_err(|e| e.to_string())
@@ -225,6 +228,20 @@ pub fn run() {
                 let state = handle.state::<ProxyState>();
                 let mut engine_guard = state.engine.lock().await;
 
+                // Ensure CA is trusted BEFORE starting the proxy so browsers
+                // never see an untrusted cert during the startup window.
+                match cert_store::ensure_ca_trusted().await {
+                    Ok(msg) => {
+                        log::info!("CA trust store: {}", msg);
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "CA cert not trusted — HTTPS interception may fail: {}",
+                            e
+                        );
+                    }
+                }
+
                 let app_handle = handle.clone();
                 let app_handle_ws = handle.clone();
                 let mut engine = ProxyEngine::new(
@@ -252,18 +269,6 @@ pub fn run() {
                             }
                             Err(e) => {
                                 log::error!("Failed to set system proxy: {}", e);
-                            }
-                        }
-
-                        match cert_store::ensure_ca_trusted().await {
-                            Ok(msg) => {
-                                log::info!("CA trust store: {}", msg);
-                            }
-                            Err(e) => {
-                                log::warn!(
-                                    "CA cert not trusted — HTTPS interception will fail: {}",
-                                    e
-                                );
                             }
                         }
                     }

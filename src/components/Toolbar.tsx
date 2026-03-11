@@ -23,7 +23,7 @@ interface ToolbarProps {
 }
 
 export default function Toolbar({
-  connected: _connected,
+  connected: _,
   onOpenPreferences,
   onOpenUpdate,
   onOpenAbout,

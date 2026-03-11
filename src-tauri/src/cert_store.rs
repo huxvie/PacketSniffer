@@ -136,7 +136,8 @@ async fn ensure_trusted_windows(
     }
 }
 
-/// Get the SHA1 thumbprint of a cert file using certutil -hashfile.
+/// Get the SHA1 thumbprint of a cert file using certutil.
+/// Uses `certutil -dump` which reliably shows the cert hash for PEM files.
 #[cfg(target_os = "windows")]
 fn get_cert_file_thumbprint(
     cert_path: &str,
@@ -145,15 +146,20 @@ fn get_cert_file_thumbprint(
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-    // certutil -dump shows the cert hash for PEM files
     let output = Command::new("certutil")
         .args(["-dump", cert_path])
         .creation_flags(CREATE_NO_WINDOW)
         .output()?;
 
+    if !output.status.success() {
+        return Err(format!(
+            "certutil -dump failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ).into());
+    }
+
     let text = String::from_utf8_lossy(&output.stdout);
 
-    // Look for "Cert Hash(sha1): ..." in the dump output
     for line in text.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("Cert Hash(sha1):") {
@@ -161,11 +167,13 @@ fn get_cert_file_thumbprint(
                 .trim_start_matches("Cert Hash(sha1):")
                 .trim()
                 .replace(' ', "");
-            return Ok(hash);
+            if hash.len() == 40 {
+                return Ok(hash);
+            }
         }
     }
 
-    Err("Could not determine cert file thumbprint".into())
+    Err(format!("Could not find SHA1 hash in certutil output for {}", cert_path).into())
 }
 
 /// Get the SHA1 thumbprint of our CA cert in the Local Machine Root store.
@@ -380,6 +388,8 @@ fn install_firefox_policies_json(ca_cert_path: &str) {
 }
 
 /// Write policies.json using elevated permissions (Program Files is admin-protected).
+/// Writes content to a temp file first, then copies via elevated cmd to avoid
+/// escaping issues with nested shell invocations.
 #[cfg(target_os = "windows")]
 fn write_policies_elevated(
     policies_path: &std::path::Path,
@@ -393,16 +403,21 @@ fn write_policies_elevated(
         }
     }
 
-    // Write via elevated cmd — use echo with a temp file approach
-    // (cmd echo doesn't handle multiline well, so use PowerShell Set-Content)
-    let escaped_content = content.replace('"', "\\\"");
-    let ps_cmd = format!(
-        "powershell -Command \"Set-Content -Path '{}' -Value '{}' -Encoding UTF8\"",
-        policies_path.to_string_lossy(),
-        escaped_content.replace('\'', "''")
-    );
+    // Write to a temp file first (no elevation needed), then copy elevated
+    let temp_file = std::env::temp_dir().join("packetsniffer_policies.json");
+    std::fs::write(&temp_file, content)?;
 
-    run_elevated(&ps_cmd)
+    let copy_cmd = format!(
+        "copy /Y \"{}\" \"{}\"",
+        temp_file.to_string_lossy(),
+        policies_path.to_string_lossy()
+    );
+    let result = run_elevated(&copy_cmd);
+
+    // Clean up temp file
+    let _ = std::fs::remove_file(&temp_file);
+
+    result
 }
 
 /// Try to find Firefox installation path from the registry.

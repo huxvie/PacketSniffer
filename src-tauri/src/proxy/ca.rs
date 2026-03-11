@@ -55,6 +55,24 @@ impl CertificateAuthority {
         }
     }
 
+    /// Force regenerate the CA cert and key (e.g. when the old cert used wrong parameters).
+    pub fn regenerate(ca_dir: Option<&Path>) -> Result<Self, Box<dyn std::error::Error>> {
+        let dir = match ca_dir {
+            Some(d) => d.to_path_buf(),
+            None => default_ca_dir()?,
+        };
+        std::fs::create_dir_all(&dir)?;
+
+        let cert_path = dir.join("ca-cert.pem");
+        let key_path = dir.join("ca-key.pem");
+
+        let ca = Self::generate_new(&dir)?;
+        std::fs::write(&cert_path, &ca.ca_cert_pem)?;
+        std::fs::write(&key_path, &ca.ca_key_pem)?;
+        log::info!("Regenerated root CA in {}", dir.display());
+        Ok(ca)
+    }
+
     /// Construct from existing PEM strings.
     fn from_pem(
         ca_dir: &Path,
@@ -89,9 +107,9 @@ impl CertificateAuthority {
             .distinguished_name
             .push(DnType::CommonName, "PacketSniffer Root CA");
 
-        // 10-year validity
+        // 10-year validity with 1-minute grace for clock skew
         let now = time::OffsetDateTime::now_utc();
-        params.not_before = now;
+        params.not_before = now - Duration::from_secs(60);
         params.not_after = now + Duration::from_secs(10 * 365 * 24 * 3600);
 
         let key_pair = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
@@ -132,12 +150,15 @@ impl CertificateAuthority {
         params
             .subject_alt_names
             .push(SanType::DnsName(hostname.try_into()?));
-        params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        params.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyEncipherment,
+        ];
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
 
-        // 1-year validity
+        // 1-year validity with 1-minute grace for clock skew
         let now = time::OffsetDateTime::now_utc();
-        params.not_before = now;
+        params.not_before = now - Duration::from_secs(60);
         params.not_after = now + Duration::from_secs(365 * 24 * 3600);
 
         let leaf_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
