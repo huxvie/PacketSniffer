@@ -46,6 +46,7 @@ export default function PreferencesDialog({
   const [loading, setLoading] = useState<boolean>(false);
   const [port, setPort] = useState("8080");
   const [portSaved, setPortSaved] = useState(false);
+  const [portError, setPortError] = useState<string | null>(null);
 
   useEffect(() => {
     if (open) {
@@ -59,6 +60,7 @@ export default function PreferencesDialog({
         .catch(() => {});
       setCaStatus(null);
       setPortSaved(false);
+      setPortError(null);
     }
   }, [open]);
 
@@ -78,10 +80,11 @@ export default function PreferencesDialog({
   const handleSavePort = async () => {
     setLoading(true);
     setPortSaved(false);
+    setPortError(null);
     try {
       const parsedPort = parseInt(port, 10);
       if (isNaN(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
-        setCaStatus("Invalid port number (1–65535)");
+        setPortError("Invalid port number (1–65535)");
         return;
       }
       await invoke("set_proxy_port", { port: parsedPort });
@@ -89,7 +92,7 @@ export default function PreferencesDialog({
       setPortSaved(true);
       setTimeout(() => setPortSaved(false), 2000);
     } catch (e) {
-      setCaStatus(`Port change failed: ${e}`);
+      setPortError(`Port change failed: ${e}`);
     } finally {
       setLoading(false);
     }
@@ -142,6 +145,9 @@ export default function PreferencesDialog({
               </InputGroup>
             </div>
           </div>
+          {portError && (
+            <p className="text-xs text-destructive">{portError}</p>
+          )}
         </div>
 
         <Separator className="bg-border/50" />

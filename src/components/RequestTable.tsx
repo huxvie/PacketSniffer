@@ -266,7 +266,9 @@ export default function RequestTable({
               <>
                 {/* Top spacer row for virtualization */}
                 {virtualItems.length > 0 && virtualItems[0].start > 0 && (
-                  <tr style={{ height: virtualItems[0].start }} />
+                  <tr>
+                    <td colSpan={9} style={{ height: virtualItems[0].start }} />
+                  </tr>
                 )}
 
                 {virtualItems.map((virtualRow) => {
@@ -290,13 +292,16 @@ export default function RequestTable({
 
                 {/* Bottom spacer row for virtualization */}
                 {virtualItems.length > 0 && (
-                  <tr
-                    style={{
-                      height:
-                        virtualizer.getTotalSize() -
-                        (virtualItems[virtualItems.length - 1].end),
-                    }}
-                  />
+                  <tr>
+                    <td
+                      colSpan={9}
+                      style={{
+                        height:
+                          virtualizer.getTotalSize() -
+                          (virtualItems[virtualItems.length - 1].end),
+                      }}
+                    />
+                  </tr>
                 )}
               </>
             )}

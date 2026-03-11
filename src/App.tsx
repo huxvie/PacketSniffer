@@ -22,7 +22,6 @@ import AboutDialog from "./components/AboutDialog";
 import UpdateDialog from "./components/UpdateDialog";
 import CaInstallDialog from "./components/CaInstallDialog";
 import DependencyDialog from "./components/DependencyDialog";
-import Spinner from "./components/Spinner";
 import type { HttpSession } from "./types";
 
 function matchesContentFilter(s: HttpSession, filter: ContentFilter): boolean {
@@ -114,7 +113,6 @@ export default function App() {
   const [aboutOpen, setAboutOpen] = useState(false);
   const [updateOpen, setUpdateOpen] = useState(false);
   const [proxyPort, setProxyPort] = useState(8080);
-  const [isInstallingCa, setIsInstallingCa] = useState(false);
   const [showCaDialog, setShowCaDialog] = useState(false);
   const [showDepDialog, setShowDepDialog] = useState(false);
   const [missingDeps, setMissingDeps] = useState<string[]>([]);
@@ -362,17 +360,6 @@ export default function App() {
           missingDeps={missingDeps}
         />
 
-        {isInstallingCa && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-            <div className="flex flex-col items-center gap-4 p-6 bg-bg-1 border border-border rounded-lg shadow-lg">
-              <Spinner size={32} />
-              <p className="text-text-0 font-medium">Installing CA Certificate...</p>
-              <p className="text-text-1 text-sm text-center max-w-xs">
-                Please follow the system prompts to complete the installation.
-              </p>
-            </div>
-          </div>
-        )}
       </div>
     </main>
   );

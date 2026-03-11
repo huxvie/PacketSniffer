@@ -259,8 +259,10 @@ fn disable_windows() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     .output();
                 notify_windows_proxy_change();
             }
-            // Always clear env vars on disable, even if we didn't track the original state
+            // Remove env vars we set (only those that match our values)
             clear_env_proxy_windows();
+            // Remove UWP loopback exemptions we added
+            disable_uwp_loopback();
             return Ok(());
         }
     };
@@ -312,8 +314,11 @@ fn disable_windows() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = winhttp_reset();
     }
 
-    // Remove environment variable proxy settings
+    // Remove environment variable proxy settings (only those we set)
     clear_env_proxy_windows();
+
+    // Remove UWP loopback exemptions we added
+    disable_uwp_loopback();
 
     log::info!("System proxy restored to original settings");
     Ok(())
@@ -542,7 +547,9 @@ fn set_env_proxy_windows(port: u16) {
     log::info!("Set HTTP_PROXY/HTTPS_PROXY environment variables (port {})", port);
 }
 
-/// Remove the proxy environment variables we set and broadcast the change.
+/// Remove the proxy environment variables we set, but only if they still hold
+/// the values we wrote. This preserves any proxy configuration the user had
+/// before PacketSniffer ran.
 #[cfg(target_os = "windows")]
 fn clear_env_proxy_windows() {
     use std::os::windows::process::CommandExt;
@@ -550,19 +557,28 @@ fn clear_env_proxy_windows() {
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
     let env_path = r"HKCU\Environment";
+    let our_no_proxy = "localhost,127.0.0.1,::1";
 
-    for name in [
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "NO_PROXY",
-        "no_proxy",
-    ] {
-        let _ = Command::new("reg")
-            .args(["delete", env_path, "/v", name, "/f"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output();
+    // Only delete HTTP(S)_PROXY if it points to our loopback proxy
+    for name in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+        if let Some(val) = reg_query_string(env_path, name) {
+            if val.starts_with("http://127.0.0.1:") {
+                let _ = Command::new("reg")
+                    .args(["delete", env_path, "/v", name, "/f"])
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .output();
+            }
+        }
+    }
+
+    // Only delete NO_PROXY if it matches exactly what we set
+    for name in ["NO_PROXY", "no_proxy"] {
+        if reg_query_string(env_path, name).as_deref() == Some(our_no_proxy) {
+            let _ = Command::new("reg")
+                .args(["delete", env_path, "/v", name, "/f"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output();
+        }
     }
 
     broadcast_setting_change_windows();
@@ -633,6 +649,48 @@ fn enable_uwp_loopback() {
             Ok(o) => {
                 log::debug!(
                     "Loopback exemption skipped for {}: {}",
+                    pkg,
+                    String::from_utf8_lossy(&o.stderr)
+                );
+            }
+            Err(e) => {
+                log::debug!("CheckNetIsolation failed for {}: {}", pkg, e);
+            }
+        }
+    }
+}
+
+/// Remove loopback exemptions for UWP / AppContainer apps that were added by
+/// `enable_uwp_loopback`. Called when the proxy is disabled so we don't leave
+/// a persistent system-level change behind.
+#[cfg(target_os = "windows")]
+fn disable_uwp_loopback() {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let uwp_packages = [
+        "Microsoft.WindowsStore_8wekyb3d8bbwe",
+        "microsoft.windowscommunicationsapps_8wekyb3d8bbwe",
+        "Microsoft.MicrosoftEdge_8wekyb3d8bbwe",
+        "Microsoft.Windows.Search_cw5n1h2txyewy",
+        "Microsoft.AAD.BrokerPlugin_cw5n1h2txyewy",
+        "Microsoft.Windows.ContentDeliveryManager_cw5n1h2txyewy",
+        "Microsoft.StorePurchaseApp_8wekyb3d8bbwe",
+    ];
+
+    for pkg in &uwp_packages {
+        let result = Command::new("CheckNetIsolation")
+            .args(["LoopbackExempt", "-d", &format!("-n={}", pkg)])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+        match result {
+            Ok(o) if o.status.success() => {
+                log::debug!("Loopback exemption removed for {}", pkg);
+            }
+            Ok(o) => {
+                log::debug!(
+                    "Loopback exemption removal skipped for {}: {}",
                     pkg,
                     String::from_utf8_lossy(&o.stderr)
                 );
