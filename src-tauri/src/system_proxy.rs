@@ -11,6 +11,11 @@ use std::sync::Mutex;
 /// Saved proxy state so we can restore on exit.
 static ORIGINAL_STATE: Mutex<Option<OriginalProxyState>> = Mutex::new(None);
 
+/// Tracks which UWP loopback exemptions were added by us (not pre-existing),
+/// so `disable_uwp_loopback` only removes what we actually added.
+#[cfg(target_os = "windows")]
+static LOOPBACK_ADDED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
 #[derive(Debug, Clone)]
 struct OriginalProxyState {
     #[cfg(target_os = "windows")]
@@ -548,21 +553,33 @@ fn set_env_proxy_windows(port: u16) {
 }
 
 /// Remove the proxy environment variables we set, but only if they still hold
-/// the values we wrote. This preserves any proxy configuration the user had
-/// before PacketSniffer ran.
+/// a value that is exactly `http://127.0.0.1:<port>` (pure loopback proxy URL
+/// with no extra path or query). This preserves any proxy configuration the
+/// user had before PacketSniffer ran, while still covering all port numbers we
+/// may have been configured with.
 #[cfg(target_os = "windows")]
 fn clear_env_proxy_windows() {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+    /// Returns true iff `val` is exactly `http://127.0.0.1:<port>` where
+    /// `<port>` is a valid u16 with no trailing characters.
+    fn is_our_proxy_url(val: &str) -> bool {
+        if let Some(port_str) = val.strip_prefix("http://127.0.0.1:") {
+            port_str.parse::<u16>().is_ok()
+        } else {
+            false
+        }
+    }
+
     let env_path = r"HKCU\Environment";
     let our_no_proxy = "localhost,127.0.0.1,::1";
 
-    // Only delete HTTP(S)_PROXY if it points to our loopback proxy
+    // Only delete HTTP(S)_PROXY if it is exactly the loopback URL we wrote
     for name in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
         if let Some(val) = reg_query_string(env_path, name) {
-            if val.starts_with("http://127.0.0.1:") {
+            if is_our_proxy_url(&val) {
                 let _ = Command::new("reg")
                     .args(["delete", env_path, "/v", name, "/f"])
                     .creation_flags(CREATE_NO_WINDOW)
@@ -616,10 +633,53 @@ fn broadcast_setting_change_windows() {
     }
 }
 
+/// Query which UWP / AppContainer packages currently have loopback exemptions
+/// by running `CheckNetIsolation LoopbackExempt -s` and parsing its output.
+/// Returns package names as-is (preserving case from the OS output).
+///
+/// Output format per line: `[N] - PackageName, SID = S-1-15-2-...`
+#[cfg(target_os = "windows")]
+fn query_loopback_exemptions() -> Vec<String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    match Command::new("CheckNetIsolation")
+        .args(["LoopbackExempt", "-s"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    {
+        Ok(out) => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let mut names = Vec::new();
+            for line in text.lines() {
+                // Expected format: "[N] - PackageName, SID = ..."  or  "[N] - PackageName"
+                if let Some(after_dash) = line.split(" - ").nth(1) {
+                    let name = after_dash.split(',').next().unwrap_or("").trim().to_string();
+                    if !name.is_empty() {
+                        names.push(name);
+                    } else {
+                        log::debug!("CheckNetIsolation -s: could not parse name from line: {:?}", line);
+                    }
+                }
+                // Lines without " - " (e.g. the header) are silently skipped
+            }
+            names
+        }
+        Err(e) => {
+            log::debug!("CheckNetIsolation LoopbackExempt -s failed: {}", e);
+            Vec::new()
+        }
+    }
+}
+
 /// Enable loopback for UWP / AppContainer apps so they can connect to our
 /// localhost proxy. Uses `CheckNetIsolation` which is available on Win 8+.
 /// Microsoft Store, Mail, and other UWP apps run in AppContainers that block
 /// loopback by default, preventing them from reaching 127.0.0.1.
+///
+/// Snapshots pre-existing exemptions first so that `disable_uwp_loopback` can
+/// remove only the entries we added (preserving any the user had beforehand).
 #[cfg(target_os = "windows")]
 fn enable_uwp_loopback() {
     use std::os::windows::process::CommandExt;
@@ -637,7 +697,17 @@ fn enable_uwp_loopback() {
         "Microsoft.StorePurchaseApp_8wekyb3d8bbwe",
     ];
 
+    // Snapshot which packages are already exempt so we skip those and don't
+    // remove them when the proxy is disabled later.
+    let already_exempt = query_loopback_exemptions();
+    let mut added: Vec<String> = Vec::new();
+
     for pkg in &uwp_packages {
+        if already_exempt.iter().any(|e| e.eq_ignore_ascii_case(pkg)) {
+            log::debug!("Loopback exemption already present for {}", pkg);
+            continue;
+        }
+
         let result = Command::new("CheckNetIsolation")
             .args(["LoopbackExempt", "-a", &format!("-n={}", pkg)])
             .creation_flags(CREATE_NO_WINDOW)
@@ -645,6 +715,7 @@ fn enable_uwp_loopback() {
         match result {
             Ok(o) if o.status.success() => {
                 log::debug!("Loopback exemption added for {}", pkg);
+                added.push(pkg.to_string());
             }
             Ok(o) => {
                 log::debug!(
@@ -658,28 +729,26 @@ fn enable_uwp_loopback() {
             }
         }
     }
+
+    *LOOPBACK_ADDED.lock().unwrap() = added;
 }
 
-/// Remove loopback exemptions for UWP / AppContainer apps that were added by
-/// `enable_uwp_loopback`. Called when the proxy is disabled so we don't leave
-/// a persistent system-level change behind.
+/// Remove only the loopback exemptions that `enable_uwp_loopback` actually
+/// added (i.e. those that were not already present before we started). This
+/// avoids clobbering pre-existing user exemptions for the same packages.
 #[cfg(target_os = "windows")]
 fn disable_uwp_loopback() {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-    let uwp_packages = [
-        "Microsoft.WindowsStore_8wekyb3d8bbwe",
-        "microsoft.windowscommunicationsapps_8wekyb3d8bbwe",
-        "Microsoft.MicrosoftEdge_8wekyb3d8bbwe",
-        "Microsoft.Windows.Search_cw5n1h2txyewy",
-        "Microsoft.AAD.BrokerPlugin_cw5n1h2txyewy",
-        "Microsoft.Windows.ContentDeliveryManager_cw5n1h2txyewy",
-        "Microsoft.StorePurchaseApp_8wekyb3d8bbwe",
-    ];
+    let added = std::mem::take(&mut *LOOPBACK_ADDED.lock().unwrap());
+    if added.is_empty() {
+        log::debug!("No loopback exemptions to remove");
+        return;
+    }
 
-    for pkg in &uwp_packages {
+    for pkg in &added {
         let result = Command::new("CheckNetIsolation")
             .args(["LoopbackExempt", "-d", &format!("-n={}", pkg)])
             .creation_flags(CREATE_NO_WINDOW)

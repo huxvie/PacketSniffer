@@ -92,7 +92,7 @@ export default function PreferencesDialog({
       setPortSaved(true);
       setTimeout(() => setPortSaved(false), 2000);
     } catch (e) {
-      setPortError(`Port change failed: ${e}`);
+      setPortError(`Port change failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setLoading(false);
     }

@@ -179,14 +179,16 @@ fn check_missing_deps() -> Vec<String> {
 
 #[tauri::command]
 async fn install_dependency(package: String) -> Result<String, String> {
-    // Only allow packages that the dependency checker itself identified as missing,
-    // preventing arbitrary root-level package installation from the frontend.
-    let allowed = cert_store::check_missing_dependencies();
-    if !allowed.contains(&package) {
-        return Err(format!("Package '{}' is not in the allowed install list", package));
-    }
-
     tokio::task::spawn_blocking(move || {
+        // Only allow packages that the dependency checker itself identified as missing,
+        // preventing arbitrary root-level package installation from the frontend.
+        let allowed = cert_store::check_missing_dependencies();
+        if !allowed.contains(&package) {
+            return Err(format!(
+                "Package '{}' is not in the allowed install list",
+                package
+            ));
+        }
         cert_store::install_package(&package).map_err(|e| e.to_string())
     })
     .await
