@@ -215,6 +215,10 @@ fn enable_windows(port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sy
     let winhttp_bypass = "<local>;localhost;127.0.0.1;::1";
     let _ = winhttp_set_proxy(&proxy_addr, winhttp_bypass);
 
+    // Set environment variables for apps that read HTTP_PROXY / HTTPS_PROXY
+    // (e.g. terminal sessions, pip, npm, git, curl, wget, Go apps, Rust apps)
+    set_env_proxy_windows(port);
+
     log::info!("System proxy set to {}", proxy_addr);
     Ok(())
 }
@@ -251,6 +255,8 @@ fn disable_windows() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     .output();
                 notify_windows_proxy_change();
             }
+            // Always clear env vars on disable, even if we didn't track the original state
+            clear_env_proxy_windows();
             return Ok(());
         }
     };
@@ -301,6 +307,9 @@ fn disable_windows() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     } else {
         let _ = winhttp_reset();
     }
+
+    // Remove environment variable proxy settings
+    clear_env_proxy_windows();
 
     log::info!("System proxy restored to original settings");
     Ok(())
@@ -496,6 +505,95 @@ fn notify_windows_proxy_change() {
 #[cfg(target_os = "windows")]
 pub fn notify_proxy_change() {
     notify_windows_proxy_change();
+}
+
+/// Set HTTP_PROXY / HTTPS_PROXY / NO_PROXY environment variables in the
+/// user registry so that new terminal sessions and CLI tools pick them up.
+/// Broadcasts WM_SETTINGCHANGE so running shells see the update.
+#[cfg(target_os = "windows")]
+fn set_env_proxy_windows(port: u16) {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let env_path = r"HKCU\Environment";
+    let proxy_url = format!("http://127.0.0.1:{}", port);
+    let no_proxy = "localhost,127.0.0.1,::1";
+
+    for (name, value) in [
+        ("HTTP_PROXY", proxy_url.as_str()),
+        ("HTTPS_PROXY", proxy_url.as_str()),
+        ("http_proxy", proxy_url.as_str()),
+        ("https_proxy", proxy_url.as_str()),
+        ("NO_PROXY", no_proxy),
+        ("no_proxy", no_proxy),
+    ] {
+        let _ = Command::new("reg")
+            .args(["add", env_path, "/v", name, "/t", "REG_SZ", "/d", value, "/f"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+    }
+
+    broadcast_setting_change_windows();
+    log::info!("Set HTTP_PROXY/HTTPS_PROXY environment variables (port {})", port);
+}
+
+/// Remove the proxy environment variables we set and broadcast the change.
+#[cfg(target_os = "windows")]
+fn clear_env_proxy_windows() {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let env_path = r"HKCU\Environment";
+
+    for name in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "NO_PROXY",
+        "no_proxy",
+    ] {
+        let _ = Command::new("reg")
+            .args(["delete", env_path, "/v", name, "/f"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+    }
+
+    broadcast_setting_change_windows();
+    log::info!("Cleared HTTP_PROXY/HTTPS_PROXY environment variables");
+}
+
+/// Broadcast WM_SETTINGCHANGE so running Explorer / shells pick up env changes.
+#[cfg(target_os = "windows")]
+fn broadcast_setting_change_windows() {
+    unsafe {
+        #[link(name = "user32")]
+        extern "system" {
+            fn SendMessageTimeoutW(
+                hwnd: *mut std::ffi::c_void,
+                msg: u32,
+                wparam: usize,
+                lparam: *const u16,
+                flags: u32,
+                timeout: u32,
+                result: *mut usize,
+            ) -> isize;
+        }
+        // HWND_BROADCAST = 0xFFFF, WM_SETTINGCHANGE = 0x001A, SMTO_ABORTIFHUNG = 0x0002
+        let env: Vec<u16> = "Environment\0".encode_utf16().collect();
+        let mut _result: usize = 0;
+        SendMessageTimeoutW(
+            0xFFFF as *mut _,
+            0x001A,
+            0,
+            env.as_ptr(),
+            0x0002,
+            5000,
+            &mut _result,
+        );
+    }
 }
 
 // ─── macOS ────────────────────────────────────────────────────────────────────
@@ -748,6 +846,11 @@ fn enable_linux(port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync
         ])
         .status();
 
+    // Set environment variables so terminal apps (curl, wget, pip, npm, git, etc.)
+    // route through our proxy. Write a drop-in file in /etc/profile.d/ and
+    // /etc/environment.d/ so all new shells and services pick them up.
+    set_env_proxy_linux(port);
+
     log::info!("System proxy set to 127.0.0.1:{}", port);
     Ok(())
 }
@@ -808,6 +911,9 @@ fn disable_linux() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     }
 
+    // Remove proxy environment variable drop-in files
+    clear_env_proxy_linux();
+
     log::info!("System proxy restored to original settings");
     Ok(())
 }
@@ -847,4 +953,87 @@ fn gsettings_get(schema: &str, key: &str) -> String {
                 .to_string()
         })
         .unwrap_or_default()
+}
+
+/// Write a drop-in shell script that exports proxy env vars for all new shells,
+/// and an environment.d config for systemd user services.
+#[cfg(target_os = "linux")]
+fn set_env_proxy_linux(port: u16) {
+    use std::process::Command;
+
+    let proxy_url = format!("http://127.0.0.1:{}", port);
+    let no_proxy = "localhost,127.0.0.1,::1";
+
+    // 1. /etc/profile.d/packetsniffer-proxy.sh — sourced by login shells (bash, zsh, etc.)
+    let profile_script = format!(
+        r#"# Managed by PacketSniffer — do not edit
+export http_proxy="{proxy_url}"
+export https_proxy="{proxy_url}"
+export HTTP_PROXY="{proxy_url}"
+export HTTPS_PROXY="{proxy_url}"
+export no_proxy="{no_proxy}"
+export NO_PROXY="{no_proxy}"
+"#
+    );
+
+    // 2. /etc/environment.d/packetsniffer-proxy.conf — read by systemd and PAM
+    let env_conf = format!(
+        r#"# Managed by PacketSniffer — do not edit
+http_proxy={proxy_url}
+https_proxy={proxy_url}
+HTTP_PROXY={proxy_url}
+HTTPS_PROXY={proxy_url}
+no_proxy={no_proxy}
+NO_PROXY={no_proxy}
+"#
+    );
+
+    let script = format!(
+        r#"cat > /etc/profile.d/packetsniffer-proxy.sh << 'EOF'
+{profile_script}EOF
+chmod 644 /etc/profile.d/packetsniffer-proxy.sh
+mkdir -p /etc/environment.d
+cat > /etc/environment.d/packetsniffer-proxy.conf << 'EOF'
+{env_conf}EOF
+chmod 644 /etc/environment.d/packetsniffer-proxy.conf"#
+    );
+
+    let status = Command::new("pkexec")
+        .args(["bash", "-c", &script])
+        .status();
+
+    match &status {
+        Ok(s) if s.success() => {
+            log::info!("Set proxy environment variables via profile.d + environment.d (port {})", port);
+        }
+        Ok(s) => {
+            log::warn!("pkexec failed to set env proxy files. Exit status: {}", s);
+        }
+        Err(e) => {
+            log::warn!("Failed to run pkexec for env proxy: {}", e);
+        }
+    }
+}
+
+/// Remove the drop-in proxy configuration files.
+#[cfg(target_os = "linux")]
+fn clear_env_proxy_linux() {
+    use std::process::Command;
+
+    let script = "rm -f /etc/profile.d/packetsniffer-proxy.sh /etc/environment.d/packetsniffer-proxy.conf";
+    let status = Command::new("pkexec")
+        .args(["bash", "-c", script])
+        .status();
+
+    match &status {
+        Ok(s) if s.success() => {
+            log::info!("Cleared proxy environment variable files");
+        }
+        Ok(s) => {
+            log::warn!("pkexec failed to clear env proxy files. Exit status: {}", s);
+        }
+        Err(e) => {
+            log::warn!("Failed to run pkexec for env proxy cleanup: {}", e);
+        }
+    }
 }

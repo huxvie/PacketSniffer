@@ -87,10 +87,17 @@ export default function App() {
 
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [textFilter, setTextFilter] = useState("");
+  const [debouncedFilter, setDebouncedFilter] = useState("");
   const [contentFilter, setContentFilter] = useState<ContentFilter>("All");
   const [selectedDomain, setSelectedDomain] = useState<string | null>(null);
   const [showPinnedOnly, setShowPinnedOnly] = useState(false);
   const [pinnedIds, setPinnedIds] = useState<Set<number>>(new Set());
+
+  // Debounce text filter to avoid re-filtering on every keystroke
+  useEffect(() => {
+    const id = setTimeout(() => setDebouncedFilter(textFilter), 150);
+    return () => clearTimeout(id);
+  }, [textFilter]);
 
   const handleTogglePin = useCallback((id: number) => {
     setPinnedIds((prev) => {
@@ -191,7 +198,7 @@ export default function App() {
   }, [clearSessions, clearWsMessages]);
 
   const filteredOrder = useMemo(() => {
-    const needle = textFilter.toLowerCase();
+    const needle = debouncedFilter.toLowerCase();
 
     return order.filter((id) => {
       if (showPinnedOnly && !pinnedIds.has(id)) return false;
@@ -214,7 +221,7 @@ export default function App() {
   }, [
     order,
     sessions,
-    textFilter,
+    debouncedFilter,
     contentFilter,
     selectedDomain,
     showPinnedOnly,

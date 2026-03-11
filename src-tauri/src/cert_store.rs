@@ -599,15 +599,18 @@ async fn ensure_trusted_linux(
 fn configure_firefox_enterprise_roots_linux(ca_cert_path: &str) {
     use std::process::Command;
 
-    // 1. Install system-wide policy using pkexec
+    // 1. Install system-wide Firefox policy using pkexec.
+    //    Firefox's Certificates.Install policy expects *file paths*, not raw cert data.
     let policy_dirs = [
         "/etc/firefox/policies",
         "/usr/lib/firefox/distribution",
         "/usr/lib/firefox-addons/distribution",
+        // Snap Firefox reads policies from its own prefix
+        "/snap/firefox/current/usr/lib/firefox/distribution",
     ];
 
-    let dest = "/usr/local/share/ca-certificates/packetsniffer-ca.crt";
-
+    // The Install array takes absolute file paths to PEM certificates.
+    let escaped_path = ca_cert_path.replace('\\', "/");
     let policies_content = format!(
         r#"{{
   "policies": {{
@@ -619,46 +622,45 @@ fn configure_firefox_enterprise_roots_linux(ca_cert_path: &str) {
     }}
   }}
 }}"#,
-        dest
+        escaped_path
     );
 
-    // Write policy JSON to a temporary file, then copy it to target dirs with pkexec
-    let temp_dir = std::env::temp_dir();
-    let temp_policy_path = temp_dir.join("packetsniffer-firefox-policies.json");
-    if std::fs::write(&temp_policy_path, &policies_content).is_ok() {
-        let temp_path_str = temp_policy_path.to_string_lossy().to_string();
-        let mut script = String::new();
-        for dir in policy_dirs {
-            script.push_str(&format!(
-                "mkdir -p '{}' && cp '{}' '{}/policies.json'; ",
-                dir, temp_path_str, dir
-            ));
-        }
+    // Use a heredoc so JSON special characters don't break the shell command
+    let mut script = String::new();
+    for dir in policy_dirs {
+        script.push_str(&format!(
+            "mkdir -p '{dir}' && cat > '{dir}/policies.json' << 'POLICYEOF'\n{policies_content}\nPOLICYEOF\n",
+        ));
+    }
 
         let status = Command::new("pkexec")
             .args(["bash", "-c", &script])
             .status();
 
-        if let Ok(s) = status {
-            if s.success() {
-                log::info!("Wrote Firefox policies.json to multiple system directories");
-            } else {
-                log::warn!("pkexec failed to write policies.json. Exit status: {}", s);
-            }
+    match &status {
+        Ok(s) if s.success() => {
+            log::info!("Wrote Firefox policies.json (cert path: {}) to system directories", escaped_path);
         }
-        
-        let _ = std::fs::remove_file(temp_policy_path);
+        Ok(s) => {
+            log::warn!("pkexec failed to write policies.json. Exit status: {}", s);
+        }
+        Err(e) => {
+            log::warn!("Failed to run pkexec for policies.json: {}", e);
+        }
     }
 
-    // 2. Add cert to all NSS databases (cert9.db) using certutil as a fallback
+    // 2. Add cert directly to all NSS databases (cert9.db) — this is the most
+    //    reliable method and works even when policies.json is ignored (e.g. Snap).
     install_firefox_nss_linux(ca_cert_path);
 
-    // 3. Fallback: Write user.js into all local Firefox profiles
+    // 3. Fallback: Write user.js into all local Firefox profiles so Firefox
+    //    trusts the system CA store via security.enterprise_roots.enabled.
     configure_firefox_profiles_fallback_linux();
 }
 
 /// Fallback for Linux: attempts to install the CA certificate directly into Firefox's
-/// NSS database using `certutil` (from libnss3-tools).
+/// NSS database using `certutil` (from libnss3-tools). This is the most reliable
+/// method for Firefox cert trust — it works across native, Snap, and Flatpak installs.
 #[cfg(target_os = "linux")]
 fn install_firefox_nss_linux(ca_cert_path: &str) {
     use std::process::Command;
@@ -703,15 +705,28 @@ fn install_firefox_nss_linux(ca_cert_path: &str) {
             }
 
             log::info!("Installing CA directly to NSS database in profile: {}", path.display());
-            
-            // certutil -d sql:/path/to/profile -A -t "C,," -n "PacketSniffer CA" -i /path/to/cert
+
+            // Delete any existing cert with the same nickname first to allow re-installs
+            let _ = Command::new("certutil")
+                .args([
+                    "-d",
+                    &format!("sql:{}", path.display()),
+                    "-D",
+                    "-n",
+                    "PacketSniffer Root CA",
+                ])
+                .status();
+
+            // Trust flags: C = trusted CA, T = trusted to issue server certs
+            // "CT,," means: SSL trust = trusted CA that can issue server certs,
+            //               Email trust = none, Object signing trust = none
             let status = Command::new("certutil")
                 .args([
                     "-d",
                     &format!("sql:{}", path.display()),
                     "-A",
                     "-t",
-                    "C,,",
+                    "CT,,",
                     "-n",
                     "PacketSniffer Root CA",
                     "-i",
