@@ -179,7 +179,20 @@ fn check_missing_deps() -> Vec<String> {
 
 #[tauri::command]
 async fn install_dependency(package: String) -> Result<String, String> {
-    cert_store::install_package(&package).map_err(|e| e.to_string())
+    tokio::task::spawn_blocking(move || {
+        // Only allow packages that the dependency checker itself identified as missing,
+        // preventing arbitrary root-level package installation from the frontend.
+        let allowed = cert_store::check_missing_dependencies();
+        if !allowed.contains(&package) {
+            return Err(format!(
+                "Package '{}' is not in the allowed install list",
+                package
+            ));
+        }
+        cert_store::install_package(&package).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("Failed to execute package installation task: {e}"))?
 }
 
 // ─── App Entry ───────────────────────────────────────────────────────────────
@@ -237,17 +250,20 @@ pub fn run() {
                 let state = handle.state::<ProxyState>();
                 let mut engine_guard = state.engine.lock().await;
 
-                // Ensure CA is trusted BEFORE starting the proxy so browsers
-                // never see an untrusted cert during the startup window.
-                match cert_store::ensure_ca_trusted().await {
-                    Ok(msg) => {
-                        log::info!("CA trust store: {}", msg);
+                // Check (non-privileged) whether the CA is already trusted.
+                // Actual installation is driven by the UI after user consent
+                // to avoid unexpected UAC/pkexec prompts at startup.
+                match cert_store::check_ca_trusted().await {
+                    Ok(true) => {
+                        log::info!("CA certificate is trusted");
+                    }
+                    Ok(false) => {
+                        log::warn!(
+                            "CA certificate is not trusted — the app will prompt for installation"
+                        );
                     }
                     Err(e) => {
-                        log::warn!(
-                            "CA cert not trusted — HTTPS interception may fail: {}",
-                            e
-                        );
+                        log::warn!("Could not check CA trust status: {}", e);
                     }
                 }
 
