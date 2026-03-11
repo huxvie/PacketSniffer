@@ -13,6 +13,8 @@ static ORIGINAL_STATE: Mutex<Option<OriginalProxyState>> = Mutex::new(None);
 
 /// Tracks which UWP loopback exemptions were added by us (not pre-existing),
 /// so `disable_uwp_loopback` only removes what we actually added.
+/// Persisted in the Windows registry at HKCU\Software\PacketSniffer\LoopbackExemptions
+/// to survive app crashes and restarts.
 #[cfg(target_os = "windows")]
 static LOOPBACK_ADDED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
@@ -633,6 +635,75 @@ fn broadcast_setting_change_windows() {
     }
 }
 
+/// Save the list of loopback exemptions we added to the Windows registry
+/// so they persist across app crashes and restarts.
+#[cfg(target_os = "windows")]
+fn save_loopback_exemptions(packages: &[String]) {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let reg_path = r"HKCU\Software\PacketSniffer";
+
+    // Create the key if it doesn't exist
+    let _ = Command::new("reg")
+        .args(["add", reg_path, "/f"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+
+    // Store the list as a comma-separated string
+    let value = packages.join(",");
+    let _ = Command::new("reg")
+        .args([
+            "add",
+            reg_path,
+            "/v",
+            "LoopbackExemptions",
+            "/t",
+            "REG_SZ",
+            "/d",
+            &value,
+            "/f",
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+
+    log::debug!("Saved loopback exemptions to registry: {}", value);
+}
+
+/// Load the list of loopback exemptions we previously added from the Windows registry.
+#[cfg(target_os = "windows")]
+fn load_loopback_exemptions() -> Vec<String> {
+    let reg_path = r"HKCU\Software\PacketSniffer";
+    match reg_query_string(reg_path, "LoopbackExemptions") {
+        Some(value) if !value.is_empty() => {
+            let packages: Vec<String> = value.split(',').map(|s| s.to_string()).collect();
+            log::debug!("Loaded loopback exemptions from registry: {:?}", packages);
+            packages
+        }
+        _ => {
+            log::debug!("No loopback exemptions found in registry");
+            Vec::new()
+        }
+    }
+}
+
+/// Clear the saved loopback exemptions from the Windows registry.
+#[cfg(target_os = "windows")]
+fn clear_loopback_exemptions() {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let reg_path = r"HKCU\Software\PacketSniffer";
+    let _ = Command::new("reg")
+        .args(["delete", reg_path, "/v", "LoopbackExemptions", "/f"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+
+    log::debug!("Cleared loopback exemptions from registry");
+}
+
 /// Query which UWP / AppContainer packages currently have loopback exemptions
 /// by running `CheckNetIsolation LoopbackExempt -s` and parsing its output.
 /// Returns package names as-is (preserving case from the OS output).
@@ -680,6 +751,7 @@ fn query_loopback_exemptions() -> Vec<String> {
 ///
 /// Snapshots pre-existing exemptions first so that `disable_uwp_loopback` can
 /// remove only the entries we added (preserving any the user had beforehand).
+/// State is persisted to the Windows registry to survive app crashes.
 #[cfg(target_os = "windows")]
 fn enable_uwp_loopback() {
     use std::os::windows::process::CommandExt;
@@ -730,21 +802,35 @@ fn enable_uwp_loopback() {
         }
     }
 
-    *LOOPBACK_ADDED.lock().unwrap() = added;
+    // Update both in-memory state and persistent storage
+    *LOOPBACK_ADDED.lock().unwrap() = added.clone();
+    save_loopback_exemptions(&added);
 }
 
 /// Remove only the loopback exemptions that `enable_uwp_loopback` actually
 /// added (i.e. those that were not already present before we started). This
 /// avoids clobbering pre-existing user exemptions for the same packages.
+/// Reads from both in-memory state and persistent registry storage to handle
+/// cleanup after app crashes.
 #[cfg(target_os = "windows")]
 fn disable_uwp_loopback() {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-    let added = std::mem::take(&mut *LOOPBACK_ADDED.lock().unwrap());
+    // Load both in-memory state and persisted state (in case the app crashed before)
+    let mut added = std::mem::take(&mut *LOOPBACK_ADDED.lock().unwrap());
+    let persisted = load_loopback_exemptions();
+
+    // Merge the two lists, preferring the persisted state if in-memory is empty
+    if added.is_empty() && !persisted.is_empty() {
+        log::debug!("Using persisted loopback exemptions (app may have crashed previously)");
+        added = persisted;
+    }
+
     if added.is_empty() {
         log::debug!("No loopback exemptions to remove");
+        clear_loopback_exemptions();
         return;
     }
 
@@ -769,6 +855,9 @@ fn disable_uwp_loopback() {
             }
         }
     }
+
+    // Clear the persistent storage after successful cleanup
+    clear_loopback_exemptions();
 }
 
 // ─── macOS ────────────────────────────────────────────────────────────────────

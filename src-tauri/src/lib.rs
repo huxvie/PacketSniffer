@@ -422,10 +422,14 @@ fn cleanup_stale_proxy() {
 
         // Also clean up stale environment variable proxy settings from a previous crash
         let env_path = r"HKCU\Environment";
-        if system_proxy::reg_query_string(env_path, "HTTP_PROXY")
-            .map(|v| v.starts_with("http://127.0.0.1:"))
-            .unwrap_or(false)
-        {
+        let proxy_keys = ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy"];
+        let has_stale_proxy = proxy_keys.iter().any(|key| {
+            system_proxy::reg_query_string(env_path, key)
+                .map(|v| v.starts_with("http://127.0.0.1:"))
+                .unwrap_or(false)
+        });
+
+        if has_stale_proxy {
             log::warn!("Detected stale proxy environment variables — clearing");
             // Delegate to disable which clears env vars
             let _ = system_proxy::disable();
