@@ -14,6 +14,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+/// Bump this whenever cert generation parameters change so stale certs
+/// are automatically regenerated on startup.
+const CA_VERSION: &str = "2";
+
 /// The Certificate Authority that generates and caches per-host TLS configs.
 pub struct CertificateAuthority {
     ca_dir: PathBuf,
@@ -38,24 +42,36 @@ impl CertificateAuthority {
 
         let cert_path = dir.join("ca-cert.pem");
         let key_path = dir.join("ca-key.pem");
+        let version_path = dir.join("ca-version");
 
-        if cert_path.exists() && key_path.exists() {
+        // Check if the cert version matches; if not, regenerate
+        let version_ok = version_path
+            .exists()
+            && std::fs::read_to_string(&version_path)
+                .map(|v| v.trim() == CA_VERSION)
+                .unwrap_or(false);
+
+        if cert_path.exists() && key_path.exists() && version_ok {
             // Load existing
             let cert_pem = std::fs::read_to_string(&cert_path)?;
             let key_pem = std::fs::read_to_string(&key_path)?;
             Self::from_pem(&dir, &cert_pem, &key_pem)
         } else {
-            // Generate new
+            // Generate new (or regenerate stale cert)
+            if cert_path.exists() {
+                log::info!("CA version mismatch — regenerating certificates");
+            }
             let ca = Self::generate_new(&dir)?;
-            // Save to disk
             std::fs::write(&cert_path, &ca.ca_cert_pem)?;
             std::fs::write(&key_path, &ca.ca_key_pem)?;
+            std::fs::write(&version_path, CA_VERSION)?;
             log::info!("Generated new root CA in {}", dir.display());
             Ok(ca)
         }
     }
 
     /// Force regenerate the CA cert and key (e.g. when the old cert used wrong parameters).
+    #[allow(dead_code)]
     pub fn regenerate(ca_dir: Option<&Path>) -> Result<Self, Box<dyn std::error::Error>> {
         let dir = match ca_dir {
             Some(d) => d.to_path_buf(),
@@ -65,10 +81,12 @@ impl CertificateAuthority {
 
         let cert_path = dir.join("ca-cert.pem");
         let key_path = dir.join("ca-key.pem");
+        let version_path = dir.join("ca-version");
 
         let ca = Self::generate_new(&dir)?;
         std::fs::write(&cert_path, &ca.ca_cert_pem)?;
         std::fs::write(&key_path, &ca.ca_key_pem)?;
+        std::fs::write(&version_path, CA_VERSION)?;
         log::info!("Regenerated root CA in {}", dir.display());
         Ok(ca)
     }
@@ -152,7 +170,6 @@ impl CertificateAuthority {
             .push(SanType::DnsName(hostname.try_into()?));
         params.key_usages = vec![
             KeyUsagePurpose::DigitalSignature,
-            KeyUsagePurpose::KeyEncipherment,
         ];
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
 

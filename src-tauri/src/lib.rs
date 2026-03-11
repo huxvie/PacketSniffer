@@ -134,9 +134,6 @@ async fn set_proxy_port(
 
 #[tauri::command]
 async fn install_ca_certificate() -> Result<String, String> {
-    // Regenerate the CA with current (fixed) parameters before installing,
-    // in case the old cert was generated without KeyEncipherment or proper validity.
-    let _ = proxy::ca::CertificateAuthority::regenerate(None);
     cert_store::ensure_ca_trusted()
         .await
         .map_err(|e| e.to_string())

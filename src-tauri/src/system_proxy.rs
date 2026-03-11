@@ -219,6 +219,10 @@ fn enable_windows(port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sy
     // (e.g. terminal sessions, pip, npm, git, curl, wget, Go apps, Rust apps)
     set_env_proxy_windows(port);
 
+    // Enable loopback for UWP/AppContainer apps (e.g. Microsoft Store, Mail, etc.)
+    // so they can connect to our localhost proxy
+    enable_uwp_loopback();
+
     log::info!("System proxy set to {}", proxy_addr);
     Ok(())
 }
@@ -593,6 +597,50 @@ fn broadcast_setting_change_windows() {
             5000,
             &mut _result,
         );
+    }
+}
+
+/// Enable loopback for UWP / AppContainer apps so they can connect to our
+/// localhost proxy. Uses `CheckNetIsolation` which is available on Win 8+.
+/// Microsoft Store, Mail, and other UWP apps run in AppContainers that block
+/// loopback by default, preventing them from reaching 127.0.0.1.
+#[cfg(target_os = "windows")]
+fn enable_uwp_loopback() {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    // Well-known package family names for common UWP apps
+    let uwp_packages = [
+        "Microsoft.WindowsStore_8wekyb3d8bbwe",
+        "microsoft.windowscommunicationsapps_8wekyb3d8bbwe",
+        "Microsoft.MicrosoftEdge_8wekyb3d8bbwe",
+        "Microsoft.Windows.Search_cw5n1h2txyewy",
+        "Microsoft.AAD.BrokerPlugin_cw5n1h2txyewy",
+        "Microsoft.Windows.ContentDeliveryManager_cw5n1h2txyewy",
+        "Microsoft.StorePurchaseApp_8wekyb3d8bbwe",
+    ];
+
+    for pkg in &uwp_packages {
+        let result = Command::new("CheckNetIsolation")
+            .args(["LoopbackExempt", "-a", &format!("-n={}", pkg)])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+        match result {
+            Ok(o) if o.status.success() => {
+                log::debug!("Loopback exemption added for {}", pkg);
+            }
+            Ok(o) => {
+                log::debug!(
+                    "Loopback exemption skipped for {}: {}",
+                    pkg,
+                    String::from_utf8_lossy(&o.stderr)
+                );
+            }
+            Err(e) => {
+                log::debug!("CheckNetIsolation failed for {}: {}", pkg, e);
+            }
+        }
     }
 }
 
