@@ -545,13 +545,18 @@ fn set_env_proxy_windows(port: u16) {
         ("no_proxy", no_proxy),
     ] {
         let _ = Command::new("reg")
-            .args(["add", env_path, "/v", name, "/t", "REG_SZ", "/d", value, "/f"])
+            .args([
+                "add", env_path, "/v", name, "/t", "REG_SZ", "/d", value, "/f",
+            ])
             .creation_flags(CREATE_NO_WINDOW)
             .output();
     }
 
     broadcast_setting_change_windows();
-    log::info!("Set HTTP_PROXY/HTTPS_PROXY environment variables (port {})", port);
+    log::info!(
+        "Set HTTP_PROXY/HTTPS_PROXY environment variables (port {})",
+        port
+    );
 }
 
 /// Remove the proxy environment variables we set, but only if they still hold
@@ -726,11 +731,19 @@ fn query_loopback_exemptions() -> Vec<String> {
             for line in text.lines() {
                 // Expected format: "[N] - PackageName, SID = ..."  or  "[N] - PackageName"
                 if let Some(after_dash) = line.split(" - ").nth(1) {
-                    let name = after_dash.split(',').next().unwrap_or("").trim().to_string();
+                    let name = after_dash
+                        .split(',')
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
                     if !name.is_empty() {
                         names.push(name);
                     } else {
-                        log::debug!("CheckNetIsolation -s: could not parse name from line: {:?}", line);
+                        log::debug!(
+                            "CheckNetIsolation -s: could not parse name from line: {:?}",
+                            line
+                        );
                     }
                 }
                 // Lines without " - " (e.g. the header) are silently skipped
@@ -772,7 +785,15 @@ fn enable_uwp_loopback() {
     // Snapshot which packages are already exempt so we skip those and don't
     // remove them when the proxy is disabled later.
     let already_exempt = query_loopback_exemptions();
+    let persisted = load_loopback_exemptions();
     let mut added: Vec<String> = Vec::new();
+
+    for pkg in &persisted {
+        if already_exempt.iter().any(|e| e.eq_ignore_ascii_case(pkg)) {
+            log::debug!("Re-claiming persisted loopback exemption for {}", pkg);
+            added.push(pkg.clone());
+        }
+    }
 
     for pkg in &uwp_packages {
         if already_exempt.iter().any(|e| e.eq_ignore_ascii_case(pkg)) {
@@ -1268,7 +1289,10 @@ chmod 644 /etc/environment.d/packetsniffer-proxy.conf"#
 
     match &status {
         Ok(s) if s.success() => {
-            log::info!("Set proxy environment variables via profile.d + environment.d (port {})", port);
+            log::info!(
+                "Set proxy environment variables via profile.d + environment.d (port {})",
+                port
+            );
         }
         Ok(s) => {
             log::warn!("pkexec failed to set env proxy files. Exit status: {}", s);
@@ -1284,10 +1308,9 @@ chmod 644 /etc/environment.d/packetsniffer-proxy.conf"#
 fn clear_env_proxy_linux() {
     use std::process::Command;
 
-    let script = "rm -f /etc/profile.d/packetsniffer-proxy.sh /etc/environment.d/packetsniffer-proxy.conf";
-    let status = Command::new("pkexec")
-        .args(["bash", "-c", script])
-        .status();
+    let script =
+        "rm -f /etc/profile.d/packetsniffer-proxy.sh /etc/environment.d/packetsniffer-proxy.conf";
+    let status = Command::new("pkexec").args(["bash", "-c", script]).status();
 
     match &status {
         Ok(s) if s.success() => {
