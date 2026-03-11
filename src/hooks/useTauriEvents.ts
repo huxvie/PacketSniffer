@@ -124,7 +124,7 @@ export function useWsMessages() {
 
       setMessages((prev) => {
         const next = new Map(prev);
-        const grouped = new Map<string, typeof batch>();
+        const grouped = new Map<number, typeof batch>();
         for (const msg of batch) {
           const arr = grouped.get(msg.sessionId) ?? [];
           arr.push(msg);
